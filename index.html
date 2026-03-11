@@ -79,6 +79,10 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 .score-red{background:rgba(248,113,113,.15);color:var(--red)}
 .rest-timer-banner{background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;animation:slideDown .3s ease}
 .overexertion-banner{border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px}
+/* Restorative practices — investment accent (v8.0) */
+.card-restorative{background:rgba(167,139,250,.06);border:1px solid rgba(167,139,250,.25);border-radius:12px;padding:12px 14px}
+.restorative-tag{display:inline-block;font-size:.6rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:rgba(167,139,250,.15);color:#a78bfa;margin-left:5px}
+.return-pill{font-size:.65rem;color:#a78bfa;background:rgba(167,139,250,.1);border-radius:6px;padding:2px 7px;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -134,6 +138,12 @@ const TASK_TIERS_DEFAULT = {
   "Grocery shopping — order submit": { full:{label:"Submit order",eu:1},         reduced:{label:"Submit order",eu:1} },
   "Grocery shopping — click and collect": { full:{label:"Drive + collect",eu:3}, reduced:{label:"Drive + collect",eu:3} },
   "Phone call":         { full:{label:"Full call",eu:2},             reduced:{label:"Voice message only",eu:1} },
+  // Restorative practices (v8.0)
+  "Yoga (full class)":                         { full:{label:"Full class",eu:4},                    reduced:{label:"Restorative poses only",eu:2},     minimal:{label:"Lying breathwork only",eu:1} },
+  "Sophrology":                                { full:{label:"Full session",eu:2},                  reduced:{label:"Short session (10 min)",eu:1} },
+  "Functional neurology exercises":            { full:{label:"Full routine",eu:2},                  reduced:{label:"Eyes + balance only",eu:1},         minimal:{label:"Eye exercises only",eu:0.5} },
+  "Vocal exercises / diaphragmatic breathing": { full:{label:"Vocal exercises + breathing",eu:1},   reduced:{label:"Humming + slow breath",eu:0.5},     minimal:{label:"Slow breath only (5 min)",eu:0} },
+  "Nervous system regulation":                 { full:{label:"Full practice",eu:1},                 reduced:{label:"Short practice (5 min)",eu:0.5},    minimal:{label:"Box breathing only",eu:0} },
 };
 
 // Which tier to default to based on gate
@@ -200,7 +210,12 @@ const TASK_COGNITIVE_MODE = {
   "Small top-up shop":"execution",
   "Full weekly shop":"execution",
   "Full shop — high sensory load":"execution",
-  "Dishwashing block":"execution"
+  "Dishwashing block":"execution",
+  // Restorative practices (v8.0)
+  "Yoga (full class)":"passive",
+  "Sophrology":"passive",
+  "Functional neurology exercises":"passive",
+  "Vocal exercises / diaphragmatic breathing":"passive",
 };
 
 const ANCHOR_PROMPTS = [
@@ -213,6 +228,102 @@ const ANCHOR_PROMPTS = [
 
 const EVENT_TYPE_ICONS = {medical:"🏥",social:"👥",travel:"✈️",work:"💼",rest:"🛌"};
 const EVENT_TYPE_EU = {medical:5,social:4,travel:12,work:6,rest:0};
+
+// ── RESTORATIVE PRACTICES (v8.0) ──────────────────
+// return_profile: "same_day" | "multi_day" | "bodywork"
+// return_eu: EU benefit expected (same_day = within hours, multi_day = next 2-3 days)
+// gate_min: minimum gate to attempt safely ("green" | "yellow" | "red")
+// contraindicated: ["red"] means do NOT attempt on red gate
+const RESTORATIVE_PRACTICES = [
+  {
+    id:"yoga",
+    name:"Yoga (full class)",
+    eu_cost:4,
+    return_profile:"multi_day",
+    return_eu:3,   // ~3 EU benefit spread across next 2 days
+    return_note:"~3 EU return over next 2 days · lowers overnight stress",
+    tiers:{
+      full:{label:"Full class",eu:4},
+      reduced:{label:"Restorative poses only",eu:2},
+      minimal:{label:"Lying breathwork only",eu:1}
+    },
+    gate_min:"yellow",
+    contraindicated:["red"],
+    note:"Full class safe on green only. Restorative poses safe on yellow."
+  },
+  {
+    id:"sophrology",
+    name:"Sophrology",
+    eu_cost:2,
+    return_profile:"multi_day",
+    return_eu:2,
+    return_note:"~2 EU return next day · nervous system downregulation",
+    tiers:{
+      full:{label:"Full session",eu:2},
+      reduced:{label:"Short session (10 min)",eu:1}
+    },
+    gate_min:"yellow",
+    contraindicated:["red"],
+    note:"Safe on yellow at reduced tier."
+  },
+  {
+    id:"functional_neuro",
+    name:"Functional neurology exercises",
+    eu_cost:2,
+    return_profile:"multi_day",
+    return_eu:2,
+    return_note:"~2 EU return over 2 days",
+    tiers:{
+      full:{label:"Full routine",eu:2},
+      reduced:{label:"Eyes + balance only",eu:1},
+      minimal:{label:"Eye exercises only",eu:0.5}
+    },
+    gate_min:"yellow",
+    contraindicated:["red"],
+    note:"Safe on yellow at reduced tier."
+  },
+  {
+    id:"vocal_exercises",
+    name:"Vocal exercises / diaphragmatic breathing",
+    eu_cost:1,
+    return_profile:"same_day",
+    return_eu:1,
+    return_note:"~1 EU same-day · vagus nerve activation",
+    tiers:{
+      full:{label:"Vocal exercises + breathing",eu:1},
+      reduced:{label:"Humming + slow breath",eu:0.5},
+      minimal:{label:"Slow breath only (5 min)",eu:0}
+    },
+    gate_min:"red",
+    contraindicated:[],
+    note:"Safe on all gates. Minimal tier always available."
+  },
+  {
+    id:"nervous_system_reg",
+    name:"Nervous system regulation",
+    eu_cost:1,
+    return_profile:"same_day",
+    return_eu:1,
+    return_note:"~1 EU same-day · calms ANS",
+    tiers:{
+      full:{label:"Full practice",eu:1},
+      reduced:{label:"Short practice (5 min)",eu:0.5},
+      minimal:{label:"Box breathing only",eu:0}
+    },
+    gate_min:"red",
+    contraindicated:[],
+    note:"Safe on all gates."
+  }
+];
+// Look up a practice by name (matches TASK_COSTS_BASE key too)
+function getRestorativePractice(name){
+  return RESTORATIVE_PRACTICES.find(p=>p.name===name||p.id===name)||null;
+}
+// Is a practice safe to attempt at this gate?
+function practiceGateSafe(practice, gate){
+  if(!practice)return true;
+  return !practice.contraindicated.includes(gate);
+}
 const EVENT_TYPE_EU_TRAVEL = {medical_travel:10};
 
 // ── DEVICE + DATE ─────────────────────────────────
@@ -2030,6 +2141,21 @@ function renderPlan(){
       ${p.midday_updated?`<div class="plan-row"><span style="font-size:.8rem;color:var(--yellow)">⚠ Updated mid-day</span></div>`:""}
       <div style="margin-top:12px;margin-bottom:4px"><h3>Priority tasks</h3></div>
       ${p.tasks.length?p.tasks.map(([name,cost,adj])=>`<div class="plan-row"><span style="font-size:.8rem">${name}${adj?" ⚠":""}</span><span style="font-size:.75rem;color:var(--muted)">${cost} EU${adj?" (ortho)":""}</span></div>`).join(""):`<div style="font-size:.8rem;color:var(--muted);padding:8px 0">Rest and recovery only today.</div>`}
+      <div style="margin-top:12px;margin-bottom:6px;display:flex;align-items:baseline;gap:7px"><h3>Restorative practices</h3><span class="restorative-tag">investments</span></div>
+      ${(()=>{
+        const gate=S.gate||"green";
+        const safe=RESTORATIVE_PRACTICES.filter(p=>practiceGateSafe(p,gate));
+        const unsafe=RESTORATIVE_PRACTICES.filter(p=>!practiceGateSafe(p,gate));
+        const rows=safe.map(pr=>{
+          const tier=getDefaultTier(pr.name,gate);
+          const eu=tier?.eu??pr.eu_cost;
+          return `<div class="plan-row"><span style="font-size:.8rem">🌿 ${pr.name}<br><span style="font-size:.65rem;color:var(--muted)">${tier?.label||""}</span></span><div style="text-align:right"><div style="font-size:.75rem;color:var(--muted)">${eu} EU</div><span class="return-pill" style="margin-top:2px;display:inline-block">${pr.return_note}</span></div></div>`;
+        });
+        if(unsafe.length){
+          rows.push(`<div style="font-size:.72rem;color:var(--muted);padding:6px 0">⚠ ${unsafe.map(p=>p.name).join(", ")} — not recommended on ${gate} gate</div>`);
+        }
+        return rows.join("")||`<div style="font-size:.8rem;color:var(--muted);padding:6px 0">No practices available at this gate.</div>`;
+      })()}
       <div style="margin-top:12px;margin-bottom:4px"><h3>Watch for</h3></div>
       ${p.warnings.map(w=>`<div style="font-size:.78rem;color:var(--subtle);padding:4px 0;display:flex;gap:8px"><span style="color:var(--yellow)">·</span>${w}</div>`).join("")}
     </div>`:`<div class="card in" style="margin-bottom:16px"><p style="color:var(--muted);font-size:.875rem">Complete morning check-in to get your plan.</p></div>`}
@@ -2220,6 +2346,80 @@ function renderTasks(){
         </div>
       </div>`;
     }).join("")}
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px">
+        <h3>Restorative practices</h3>
+        <span class="restorative-tag">investments</span>
+      </div>
+      <p style="font-size:.74rem;color:var(--muted);margin-bottom:12px;line-height:1.5">These return energy over time — they are investments, not expenditures. Cost now, benefit later.</p>
+      ${RESTORATIVE_PRACTICES.map(practice => {
+        const gate = S.gate||"green";
+        const safe = practiceGateSafe(practice, gate);
+        const allTiers = getAllTiers(practice.name);
+        const defaultTier = getDefaultTier(practice.name, gate);
+        const adjEu = defaultTier?.eu ?? practice.eu_cost;
+        const expanded = !!S.task_expanded[practice.name];
+        const canDo = rem>=adjEu && !cutoff && S.rest_timer===null && euPct()<100 && safe;
+        const profileBadge = practice.return_profile==="same_day"
+          ? `<span style="font-size:.6rem;color:var(--green);background:rgba(52,211,153,.1);padding:1px 5px;border-radius:4px">same-day return</span>`
+          : practice.return_profile==="multi_day"
+          ? `<span style="font-size:.6rem;color:#a78bfa;background:rgba(167,139,250,.1);padding:1px 5px;border-radius:4px">multi-day return</span>`
+          : `<span style="font-size:.6rem;color:var(--accent);background:rgba(56,189,248,.1);padding:1px 5px;border-radius:4px">bodywork return</span>`;
+
+        if(!safe){
+          return `<div class="card-restorative in" style="margin-bottom:7px;opacity:.4">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <div>
+                <span style="font-size:.8rem">🌿 ${practice.name}</span>
+                ${profileBadge}
+                <div style="font-size:.68rem;color:var(--red);margin-top:3px">⚠ Contraindicated on ${gate} gate — rest instead</div>
+              </div>
+              <span class="return-pill">${practice.return_note}</span>
+            </div>
+          </div>`;
+        }
+
+        if(expanded){
+          return `<div class="card-restorative in" style="margin-bottom:7px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <div>
+                <span style="font-size:.8rem;font-weight:500">🌿 ${practice.name}</span> ${profileBadge}
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="return-pill">${practice.return_note}</span>
+                <button class="task-collapse-btn" data-taskname="${practice.name}" style="background:none;border:none;color:var(--muted);font-size:.7rem;cursor:pointer">↑ less</button>
+              </div>
+            </div>
+            ${allTiers.map(tier => {
+              const tierCanDo = rem>=tier.eu && !cutoff && S.rest_timer===null && euPct()<100;
+              const isDefault = tier.key===defaultTier?.key;
+              return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(167,139,250,.15);opacity:${tierCanDo?1:.45}">
+                <span style="font-size:.77rem;color:${isDefault?"var(--text)":"var(--muted)"}">${tier.label}${isDefault?` <span style="font-size:.6rem;color:#a78bfa;background:rgba(167,139,250,.12);padding:1px 5px;border-radius:4px">${gate} gate</span>`:""}</span>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:.72rem;color:var(--muted)">${tier.eu} EU</span>
+                  <button class="btn" data-task="${practice.name}" data-cost="${tier.eu}" data-tier="${tier.key}" style="padding:4px 10px;font-size:.72rem;border-radius:7px;background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.3)" ${tierCanDo?"":"disabled"}>Log</button>
+                </div>
+              </div>`;
+            }).join("")}
+          </div>`;
+        }
+
+        return `<div class="card-restorative in" style="margin-bottom:7px;opacity:${canDo?1:.55}">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="flex:1;min-width:0">
+              <div><span style="font-size:.8rem;font-weight:500">🌿 ${practice.name}</span> ${profileBadge}</div>
+              <div style="font-size:.67rem;color:var(--muted);margin-top:2px">${defaultTier?.label||""}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:7px;flex-shrink:0;margin-left:8px">
+              <span class="return-pill">${practice.return_note}</span>
+              ${allTiers.length>1?`<button class="task-expand-btn" data-taskname="${practice.name}" style="background:none;border:none;color:#a78bfa;font-size:.68rem;cursor:pointer;white-space:nowrap">↕ ${allTiers.length}</button>`:""}
+              <span style="font-size:.75rem;color:var(--muted)">${adjEu} EU</span>
+              <button class="btn" data-task="${practice.name}" data-cost="${adjEu}" data-tier="${defaultTier?.key||"full"}" style="padding:5px 12px;font-size:.75rem;border-radius:8px;background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.3)" ${canDo?"":"disabled"}>Log</button>
+            </div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
     <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
       <h3 style="margin-bottom:10px">MHMR rules</h3>
       ${["≤10 min per task","≤1 EU per block","Stop immediately if needed","15–20 min rest after","One task per block","No MHMR after 21:30"].map(r=>`<div style="font-size:.78rem;color:var(--subtle);padding:4px 0;display:flex;gap:8px"><span style="color:var(--accent)">·</span>${r}</div>`).join("")}
@@ -4090,18 +4290,20 @@ function bindEventSheet(){
     const start_time=document.getElementById("ev-time")?.value||null;
     const type=S.event_edit?.type||"medical";
     if(!title||!date){alert("Title and date are required.");return;}
-    const data={device_id:DEVICE_ID(),date,title,type,eu_cost:eu,buffer_eu:buffer,recovery_days:recovery,notes,start_time};
+    // start_time kept in local object only — column not in Supabase schema
+    const data={device_id:DEVICE_ID(),date,title,type,eu_cost:eu,buffer_eu:buffer,recovery_days:recovery,notes};
+    const localData={...data,start_time}; // include start_time in local state only
     try{
       if(S.event_edit?.id){
         await sbUpdate("pacing_arc_events",S.event_edit.id,data);
-        EVENTS=EVENTS.map(e=>e.id===S.event_edit.id?{...e,...data}:e);
+        EVENTS=EVENTS.map(e=>e.id===S.event_edit.id?{...e,...localData}:e);
       }else{
         const saved=await sbInsert("pacing_arc_events",data);
-        if(saved&&saved.id)EVENTS.push(saved);
-        else EVENTS.push({...data,id:"tmp_"+Date.now()});
+        if(saved&&saved.id)EVENTS.push({...saved,start_time});
+        else EVENTS.push({...localData,id:"tmp_"+Date.now()});
       }
     }catch(err){
-      EVENTS.push({...data,id:"tmp_"+Date.now()});
+      EVENTS.push({...localData,id:"tmp_"+Date.now()});
       showToast("Save failed — event stored locally only: "+err.message);
     }
     S.show_event_sheet=false;S.event_edit=null;render();
