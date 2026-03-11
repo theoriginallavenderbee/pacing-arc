@@ -362,6 +362,7 @@ let S={
   show_scheduler:false, scheduler_template:null, scheduler_results:null,
   // v5.1
   show_evening:false, evening_step:0, evening_data:{}, evening_done:false,
+  show_voluntary:false, voluntary_step:0, voluntary_data:{},
   show_panic:false, panic_step:0, panic_data:{},
   show_crash_walkthrough:false, crash_walk_step:0,
   show_trends:false,
@@ -402,7 +403,6 @@ async function init(){
   fetchWeather().catch(()=>{});
   try{
     const row=await sbGetProfile();
-    console.log("[PacingArc] sbGetProfile raw row:", JSON.stringify(row));
     if(row&&row.checkin){
       // Merge: Supabase row is source of truth, but if localStorage has fields
       // that Supabase row is missing (e.g. bb_high saved before a previous upsert bug),
@@ -429,7 +429,6 @@ async function init(){
       }
       // Keep localStorage in sync so offline fallback is always current
       localStorage.setItem("pac_profile",JSON.stringify(PROFILE));
-      console.log("[PacingArc] PROFILE loaded — bb_low:",PROFILE.bb_low,"bb_high:",PROFILE.bb_high,"cycle_length:",PROFILE.cycle_length,"last_period_start:",PROFILE.last_period_start);
       const today=await sbGetToday();
       if(today){
         S.eu_used=today.eu_used||0;
@@ -452,7 +451,6 @@ async function init(){
           } else if(S.memory_adjustment&&S.memory_adjustment.pct<0){
             S.eu_budget=Math.round(S.eu_budget*(1+Math.abs(S.memory_adjustment.pct)/100));
           }
-          console.log("[PacingArc] Gate/EU recalculated on load — gate:",S.gate,"eu_budget:",S.eu_budget,"bb_high used:",PROFILE&&PROFILE.bb_high);
         } else {
           S.gate=today.gate||"green";
           S.eu_budget=today.eu_budget||12;
@@ -507,10 +505,7 @@ async function syncToday(){
   try{
     await sbSaveToday({gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,plan:S.plan||null,checkin:S.ci||null,midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done});
     SYNC_STATUS="ok";
-  }catch(e){
-    SYNC_STATUS="off";
-    console.warn("[PacingArc] syncToday failed:",e.message);
-  }
+  }catch(e){SYNC_STATUS="off";console.warn("[PacingArc] syncToday failed:",e.message);}
   updateSyncDot();
 }
 function updateSyncDot(){
@@ -922,7 +917,7 @@ function gateColour(ci){
   if(syms.includes("Mild wired-tired"))pemScore+=0.5;
   if(syms.includes("Sore throat/flu feeling"))pemScore+=1;
   if(syms.includes("Sensory sensitivity"))pemScore+=0.5;
-  const pemCount=pemScore; // keep name for hasPEM check below
+  const pemCount=pemScore;
   s+=Math.min(2,pemScore);
 
   let gate=s>=4?"red":s>=2?"yellow":"green";
@@ -980,6 +975,11 @@ function euBudget(ci,bankingMod){
   const sleepShort=sleepHours!==null&&sleepHours<6;
   if(env.includes("Temp >26°C")||env.includes("UV >7")||sleepShort)base=Math.round(base*.75);
 
+  // Food timing modifier — fasting from wake-up compounds sleep inertia
+  const eaten=ci.eaten_yet;
+  if(eaten==="Not yet")base=Math.round(base*.92);        // −8%
+  else if(eaten==="Coffee / drink only")base=Math.round(base*.95); // −5%
+
   // Banking modifier
   if(bankingMod!==undefined&&bankingMod<1)base=Math.round(base*bankingMod);
 
@@ -1023,7 +1023,7 @@ function generatePlan(ci){
   const syms=ci.symptoms||[];
   const pemHeavy=["Muscle pain","Sore throat/flu feeling","Strongly wired-tired"];
   const pemLight=["Muscle tightness","Mild wired-tired","Sensory sensitivity"];
-  const pemCount=syms.filter(x=>pemHeavy.includes(x)).length + syms.filter(x=>pemLight.includes(x)).length*0.5;
+  const pemCount=syms.filter(x=>pemHeavy.includes(x)).length+syms.filter(x=>pemLight.includes(x)).length*0.5;
 
   // Rest ratio
   let restRatio="10 min activity / 30 min rest";
@@ -1244,7 +1244,7 @@ const CI_STEPS=[
   {id:"rhr",q:"Resting HR this morning?",hint:"From your Garmin overnight reading",type:"number",unit:"bpm",ph:"e.g. 62"},
   {id:"sleep",q:"Sleep score?",hint:"Garmin sleep score or estimate 0–100",type:"slider",min:0,max:100,def:65,
     lbl:v=>v<40?"Poor":v<60?"Fair":v<80?"Good":"Excellent",col:v=>v<40?"#f87171":v<60?"#fb923c":v<80?"#fbbf24":"#34d399"},
-  {id:"sleep_hours",q:"Sleep duration?",hint:"Hours shown in Garmin Connect — enables <6h EU modifier",type:"number",unit:"hrs",ph:"e.g. 6.5"},
+  {id:"sleep_hours",q:"Sleep duration?",hint:"Hours shown in Garmin Connect — enables Sleep <6h EU modifier",type:"number",unit:"hrs",ph:"e.g. 6.5"},
   {id:"energy",q:"Your energy right now?",hint:"0 = nothing, 10 = best in months",type:"slider",min:0,max:10,def:5,
     lbl:v=>v<3?"Very low":v<5?"Low":v<7?"Moderate":"Good",col:v=>v<3?"#f87171":v<5?"#fb923c":v<7?"#fbbf24":"#34d399"},
   // v6.0 — te whare tapa whā (non-physical walls)
@@ -1265,6 +1265,8 @@ const CI_STEPS=[
 
   {id:"night_waking",q:"Did you wake in the night?",hint:"Affects recovery quality — log for pattern tracking",type:"choice",
     opts:["No","Yes — calm","Yes — unsettled"],cols:["#34d399","#fbbf24","#f87171"]},
+  {id:"eaten_yet",q:"Have you eaten yet today?",hint:"Fasting from wake-up affects energy — be honest",type:"choice",
+    opts:["Yes","Not yet","Coffee / drink only"],cols:["#34d399","#fbbf24","#fb923c"]},
   {id:"plans",q:"Plans or concerns today?",hint:"Appointments, visitors, tasks",type:"text",ph:"Leave blank if none"}
 ];
 
@@ -1902,6 +1904,7 @@ function renderMain(){
   const tabs=[
     {id:"plan",icon:"📋",label:"Plan"},
     {id:"tasks",icon:"⚡",label:"Tasks"},
+    {id:"week",icon:"🗓",label:"Week"},
     {id:"events",icon:"📅",label:"Events"},
     {id:"home",icon:"🏠",label:"House"},
     {id:"meals",icon:"🍱",label:"Meals"},
@@ -1922,6 +1925,7 @@ function renderMain(){
   if(S.show_scheduler)sheets.push(renderSchedulerSheet());
   if(S.show_midday)sheets.push(renderMiddaySheet());
   if(S.show_evening)sheets.push(renderEveningSheet());
+  if(S.show_voluntary)sheets.push(renderVoluntarySheet());
   if(S.show_panic)sheets.push(renderPanicSheet());
   if(S.show_wakeup_check)sheets.push(renderWakeupCheckSheet());
 
@@ -1991,6 +1995,12 @@ function renderPlan(){
       </div>
     </div>
     ${WEATHER?weatherStripHtml():""}
+    ${S.ci&&S.ci.eaten_yet&&S.ci.eaten_yet!=="Yes"&&!S.ci.first_meal_time?`
+    <div class="card-sm in" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+      <span style="font-size:.8rem;color:var(--muted)">🍽 First meal today?</span>
+      <button id="btn-first-meal" class="btn btn-secondary" style="padding:6px 14px;font-size:.78rem">Log now</button>
+    </div>`:S.ci&&S.ci.first_meal_time?`
+    <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px">🍽 First meal: ${S.ci.first_meal_time}</div>`:""}
     ${renderProjectReadinessCard()}
     ${renderAnchorPrompt()}
     ${p?`
@@ -2007,6 +2017,7 @@ function renderPlan(){
     ${renderForecastStrip()}
     ${isMiddayWindow()?`<button class="btn btn-secondary in" id="btn-midday" style="width:100%;margin-bottom:14px">🕐 Mid-day check-in</button>`:""}
     ${isEvening&&!S.evening_done?`<button class="btn btn-secondary in" id="btn-evening" style="width:100%;margin-bottom:14px;border-color:rgba(129,140,248,.3)!important;color:var(--accent2)">🌙 Evening check-in</button>`:""}
+    ${S.ci&&S.ci.battery!==undefined?`<button class="btn btn-secondary in" id="btn-voluntary" style="width:100%;margin-bottom:14px;border-color:rgba(148,163,184,.25)!important;color:var(--subtle);font-size:.82rem">↺ Energy shift check-in</button>`:""}
     ${isEvening&&S.evening_done?`<div style="font-size:.75rem;color:var(--muted);text-align:center;margin-bottom:12px">✓ Evening check-in complete</div>`:""}
     ${renderBedtimeCard()}
     ${renderMaintenanceSuggestions()}
@@ -2198,6 +2209,71 @@ function renderTasks(){
       <button class="btn in" id="btn-panic" style="width:100%;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3)!important;color:var(--red);font-weight:500">🛑 Stop — I need to rest</button>
     </div>
   </div>`;
+}
+
+// ── WEEK PLANNING VIEW (v6.8) ─────────────────────
+function renderWeekView(){
+  const today=todayStr();
+  const days=Array.from({length:7},(_,i)=>dateAddDays(today,i));
+  const mods=calcBankingModifiers(EVENTS,today,dateAddDays(today,7));
+
+  return `<div class="section">
+    <h2 style="margin-bottom:4px">Week at a glance</h2>
+    <p style="color:var(--muted);font-size:.78rem;margin-bottom:16px">Projected EU budgets and scheduled events — plan tasks around the gaps.</p>
+    ${days.map(d=>{
+      const isToday=d===today;
+      const dayLabel=new Date(d+'T12:00').toLocaleDateString('en-NZ',{weekday:'short',day:'numeric',month:'short'});
+      const eu=isToday?S.eu_budget:forecastEuForDate(d);
+      const bankMod=mods[d]??1.0;
+      const dayEvents=EVENTS.filter(e=>e.date===d).sort((a,b)=>(a.start_time||"99:99").localeCompare(b.start_time||"99:99"));
+      const eventEuTotal=dayEvents.reduce((sum,e)=>sum+(e.eu_cost||0),0);
+      const euAfterEvents=eu-eventEuTotal;
+      const phase=d===today&&S.ci?.phase?S.ci.phase:estimatePhaseForDate(d);
+      const phaseColour=phase==="Late luteal"?"#f87171":phase==="Luteal"?"#fb923c":phase==="Ovulation"?"#818cf8":"#34d399";
+
+      return `<div class="card" style="margin-bottom:10px${isToday?";border-color:var(--accent);border-width:1.5px":""}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <span style="font-weight:500;font-size:.9rem${isToday?";color:var(--accent)":""}">${isToday?"Today — ":""}${dayLabel}</span>
+            ${phase&&phase!=="Not tracking"?`<span style="font-size:.7rem;color:${phaseColour};margin-left:8px">${phase}</span>`:""}
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:1rem;font-weight:500;color:${eu>=10?"#34d399":eu>=6?"#fbbf24":"#f87171"}">${eu} EU</div>
+            ${bankMod<1?`<div style="font-size:.65rem;color:var(--orange)">banking ×${bankMod.toFixed(2)}</div>`:""}
+          </div>
+        </div>
+        ${dayEvents.length?`
+        <div style="margin-bottom:6px">
+          ${dayEvents.map(e=>`
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:var(--bg3);border-radius:8px;margin-bottom:4px;font-size:.78rem">
+            <span style="color:var(--subtle)">${e.start_time?`<span style="color:var(--muted)">${e.start_time}</span> `:""}${e.title}</span>
+            <span style="color:var(--orange);font-weight:500">${e.eu_cost} EU</span>
+          </div>`).join("")}
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted);padding:4px 2px;border-top:1px solid var(--border)">
+          <span>After events: <strong style="color:${euAfterEvents>=4?"var(--green)":euAfterEvents>=1?"var(--yellow)":"var(--red)"}">${euAfterEvents} EU free</strong></span>
+          <span>${eventEuTotal} EU committed</span>
+        </div>`:
+        `<div style="font-size:.75rem;color:var(--border);padding:4px 2px">No events scheduled — ${eu} EU available</div>`}
+      </div>`;
+    }).join("")}
+    <p style="color:var(--muted);font-size:.72rem;margin-top:8px;text-align:center">Projections based on today's profile. Actual values depend on morning check-in.</p>
+  </div>`;
+}
+
+// Helper — estimate cycle phase for a future date from profile
+function estimatePhaseForDate(dateStr){
+  if(!PROFILE||!PROFILE.last_period_start||!PROFILE.cycle_length)return null;
+  const cycleLen=Number(PROFILE.cycle_length)||28;
+  const lps=new Date(PROFILE.last_period_start+"T12:00");
+  const target=new Date(dateStr+"T12:00");
+  const daysSince=Math.floor((target-lps)/(86400000));
+  const dayInCycle=((daysSince%cycleLen)+cycleLen)%cycleLen;
+  if(dayInCycle<5)return "Menstruation";
+  if(dayInCycle<13)return "Follicular";
+  if(dayInCycle<16)return "Ovulation";
+  if(dayInCycle<cycleLen-5)return "Luteal";
+  return "Late luteal";
 }
 
 // ── EVENTS TAB (v4.3 + v4.4) ─────────────────────
@@ -3109,6 +3185,53 @@ function renderCrashWalkthrough(){
   </div>`;
 }
 
+// ── VOLUNTARY / PARTIAL CHECK-IN SHEET (v6.8) ──────
+// Available any time — no Garmin data required. Updates gate and EU based on current feel.
+function renderVoluntarySheet(){
+  const step=S.voluntary_step||0;
+  const data=S.voluntary_data||{};
+  const steps=[
+    {id:"energy",q:"Energy right now?",hint:"0 = nothing, 10 = best in months",type:"slider",min:0,max:10,def:5,
+      lbl:v=>v<3?"Very low":v<5?"Low":v<7?"Moderate":"Good",col:v=>v<3?"#f87171":v<5?"#fb923c":v<7?"#fbbf24":"#34d399"},
+    {id:"battery",q:"Body Battery? (optional)",hint:"Skip if you haven't checked — leave at 50",type:"slider",min:0,max:100,def:data.battery??50,
+      lbl:v=>v<25?"Depleted":v<50?"Low":v<75?"Moderate":"Good",col:v=>v<25?"#f87171":v<50?"#fb923c":v<75?"#fbbf24":"#34d399",optional:true},
+    {id:"symptoms",q:"Any symptoms right now?",hint:"Select all that apply",type:"multi",
+      opts:["Brain fog","Muscle tightness","Muscle pain","Sore throat/flu feeling","Dizziness/orthostatic","Sensory sensitivity","Mild wired-tired","Strongly wired-tired","Headache","Nausea","None"]},
+  ];
+  const s=steps[step];
+  const val=data[s.id]??(s.type==="multi"?[]:s.type==="slider"?s.def:"");
+  const pct=Math.round(((step+1)/steps.length)*100);
+  let inputH="";
+  if(s.type==="slider"){
+    const c=s.col(Number(val)),l=s.lbl(Number(val));
+    inputH=`<div style="margin-bottom:8px">
+      <div class="sl-val" style="font-size:1.1rem;font-weight:500;color:${c};margin-bottom:10px">${val} — ${l}</div>
+      <div style="position:relative;height:6px;background:var(--bg3);border-radius:3px;margin-bottom:16px">
+        <div id="vcl-sl-fill" style="position:absolute;left:0;top:0;height:100%;width:${((Number(val)-s.min)/(s.max-s.min))*100}%;background:${c};border-radius:3px;transition:width .15s"></div>
+      </div>
+      <input type="range" id="vcl-sl" min="${s.min}" max="${s.max}" value="${val}" style="width:100%"/>
+    </div>${s.optional?'<p style="color:var(--muted);font-size:.72rem;text-align:center;margin-top:4px">Optional — tap Next to skip</p>':""}`;
+  }else if(s.type==="multi"){
+    inputH=`<div class="tags">${s.opts.map(o=>`<button class="vcl-tag${Array.isArray(val)&&val.includes(o)?" sel":""}" data-v="${o}">${o}</button>`).join("")}</div>`;
+  }
+  const canGo=s.type==="text"||(s.type==="choice"&&val)||(s.type==="multi"&&Array.isArray(val)&&val.length)||(s.type==="slider");
+  const isLast=step===steps.length-1;
+  return `<div class="sheet-overlay" id="voluntary-sheet-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="font-size:1.1rem">↺ Energy shift check-in</h2>
+        <button id="close-voluntary-sheet" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Updates your gate and EU based on how you feel right now. Use any time — no Garmin data needed.</p>
+      <div style="height:3px;background:var(--bg3);border-radius:2px;margin-bottom:16px"><div style="height:100%;width:${pct}%;border-radius:2px;background:linear-gradient(90deg,var(--accent),var(--accent2))"></div></div>
+      <p style="color:var(--muted);font-size:.8rem;margin-bottom:16px">${step+1}/${steps.length} · ${s.q}</p>
+      ${inputH}
+      <button class="btn btn-primary" id="voluntary-next" style="width:100%;margin-top:16px" ${canGo?"":"disabled"}>${isLast?"✓ Update":"Next →"}</button>
+    </div>
+  </div>`;
+}
+
 // ── EVENING CHECK-IN SHEET (v5.1) ─────────────────
 function renderEveningSheet(){
   const step=S.evening_step||0;
@@ -3303,7 +3426,6 @@ function bindSettings(){
     try{
       await sbSaveProfile(PROFILE);
       SYNC_STATUS="ok";
-      console.log("[PacingArc] Profile saved to Supabase:", JSON.stringify(PROFILE));
       showToast("✓ Profile saved to Supabase","green");
     }catch(e){
       SYNC_STATUS="off";
@@ -3705,9 +3827,23 @@ function bindMain(){
 
   // Evening check-in
   document.getElementById("btn-evening")?.addEventListener("click",()=>{S.show_evening=true;S.evening_step=0;S.evening_data={};render();});
+  document.getElementById("btn-voluntary")?.addEventListener("click",()=>{S.show_voluntary=true;S.voluntary_step=0;S.voluntary_data={battery:S.ci?.battery??50,energy:S.ci?.energy??5};render();});
+  document.getElementById("btn-first-meal")?.addEventListener("click",()=>{
+    if(!S.ci)S.ci={};
+    const now=new Date();
+    S.ci.first_meal_time=now.toLocaleTimeString("en-NZ",{hour:"2-digit",minute:"2-digit"});
+    S.ci.eaten_yet="Yes";
+    // Recalculate EU now that fasting penalty no longer applies
+    const bm=getBankingModForDate(todayStr());
+    const newBudget=euBudget(S.ci,bm);
+    if(newBudget>S.eu_budget){S.eu_budget=newBudget;}
+    render();syncToday();
+    showToast("First meal logged — EU updated");
+  });
   document.getElementById("close-evening-sheet")?.addEventListener("click",()=>{S.show_evening=false;render();});
   document.getElementById("evening-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="evening-sheet-overlay"){S.show_evening=false;render();}});
   bindEveningSheet();
+  bindVoluntarySheet();
 
   // Panic button
   document.querySelectorAll("#btn-panic").forEach(b=>b.addEventListener("click",()=>{S.show_panic=true;S.panic_step=0;S.panic_data={};render();}));
@@ -3831,11 +3967,13 @@ function clearCrashWalkTimer(){if(crashWalkTimer){clearInterval(crashWalkTimer);
 function bindEveningSheet(){
   if(!S.show_evening)return;
   const step=S.evening_step||0;
+  // Must match renderEveningSheet steps exactly (6 steps incl. cognitive_feel)
   const steps=[
     {id:"rating",type:"choice"},{id:"eu_accuracy",type:"choice"},
     {id:"symptoms",type:"multi"},{id:"feel_vs_morning",type:"choice"},
-    {id:"notes_tomorrow",type:"text"}
+    {id:"cognitive_feel",type:"choice"},{id:"notes_tomorrow",type:"text"}
   ];
+  const totalSteps=steps.length;
   const s=steps[step];
   document.querySelectorAll(".ev-choice").forEach(b=>b.addEventListener("click",()=>{
     S.evening_data[s.id]=b.dataset.v;render();
@@ -3847,10 +3985,8 @@ function bindEveningSheet(){
   }));
   document.getElementById("ev-notes-in")?.addEventListener("input",e=>{S.evening_data[s.id]=e.target.value;});
   document.getElementById("evening-next")?.addEventListener("click",async()=>{
-    // steps is defined in renderEveningSheet scope — recalculate length
-    const totalSteps = 6; // 5 original + 1 cognitive_feel (v6.0)
     if(step<totalSteps-1){S.evening_step=step+1;render();return;}
-    // Save evening data
+    // Save evening data — do NOT recalculate gate/EU (morning values are authoritative)
     S.ci.evening_rating=S.evening_data.rating;
     S.ci.evening_symptoms=S.evening_data.symptoms||[];
     S.ci.evening_eu_accuracy=S.evening_data.eu_accuracy;
@@ -3860,6 +3996,65 @@ function bindEveningSheet(){
     S.ci.notes_tomorrow=S.evening_data.notes_tomorrow||"";
     S.evening_done=true;S.show_evening=false;
     render();syncToday();
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// BIND VOLUNTARY SHEET (v6.8)
+// ═══════════════════════════════════════════════════
+function bindVoluntarySheet(){
+  if(!S.show_voluntary)return;
+  const step=S.voluntary_step||0;
+  document.getElementById("close-voluntary-sheet")?.addEventListener("click",()=>{S.show_voluntary=false;render();});
+  document.getElementById("voluntary-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="voluntary-sheet-overlay"){S.show_voluntary=false;render();}});
+  document.getElementById("vcl-sl")?.addEventListener("input",e=>{
+    const v=Number(e.target.value);
+    const id=step===0?"energy":"battery";
+    S.voluntary_data[id]=v;
+    const steps=[
+      {lbl:v=>v<3?"Very low":v<5?"Low":v<7?"Moderate":"Good",col:v=>v<3?"#f87171":v<5?"#fb923c":v<7?"#fbbf24":"#34d399"},
+      {lbl:v=>v<25?"Depleted":v<50?"Low":v<75?"Moderate":"Good",col:v=>v<25?"#f87171":v<50?"#fb923c":v<75?"#fbbf24":"#34d399"},
+    ];
+    const s=steps[step]||steps[0];
+    const c=s.col(v),l=s.lbl(v);
+    const lbl=document.querySelector(".sl-val"),fill=document.getElementById("vcl-sl-fill");
+    if(lbl){lbl.textContent=`${v} — ${l}`;lbl.style.color=c;}
+    if(fill){fill.style.width=`${((v-(step===0?0:0))/(step===0?10:100))*100}%`;fill.style.background=c;}
+    document.getElementById("voluntary-next").disabled=false;
+  });
+  document.querySelectorAll(".vcl-tag").forEach(b=>b.addEventListener("click",()=>{
+    const v=b.dataset.v;let cur=S.voluntary_data.symptoms||[];
+    if(v==="None"){cur=["None"];}else{cur=cur.filter(x=>x!=="None");cur=cur.includes(v)?cur.filter(x=>x!==v):[...cur,v];}
+    S.voluntary_data.symptoms=cur;render();
+  }));
+  document.getElementById("voluntary-next")?.addEventListener("click",()=>{
+    const totalSteps=3;
+    if(step<totalSteps-1){S.voluntary_step=step+1;render();return;}
+    // Apply: merge voluntary data into ci and recalculate gate/EU
+    const prevBudget=S.eu_budget;
+    const prevUsed=S.eu_used;
+    const newEnergy=S.voluntary_data.energy??S.ci?.energy??5;
+    const newBattery=S.voluntary_data.battery??S.ci?.battery??50;
+    const newSyms=S.voluntary_data.symptoms||[];
+    // Merge new readings into ci — keep all other fields (HRV, sleep, phase etc.)
+    const updatedCi={...(S.ci||{}),energy:newEnergy,battery:newBattery,
+      symptoms:[...new Set([...((S.ci||{}).symptoms||[]).filter(x=>x!=="None"),...newSyms.filter(x=>x!=="None")])]};
+    if(newSyms.includes("None"))updatedCi.symptoms=["None"];
+    S.ci=updatedCi;
+    const bankingMod=getBankingModForDate(todayStr());
+    const newGate=gateColour(updatedCi);
+    const newBudgetRaw=euBudget(updatedCi,bankingMod);
+    // Apply same memory adjustments as morning
+    let newBudget=newBudgetRaw;
+    if(S.memory_adjustment&&S.memory_adjustment.pct>0)newBudget=Math.max(3,Math.round(newBudget*(1-S.memory_adjustment.pct/100)));
+    else if(S.memory_adjustment&&S.memory_adjustment.pct<0)newBudget=Math.round(newBudget*(1+Math.abs(S.memory_adjustment.pct)/100));
+    S.gate=newGate;
+    // Preserve used EU — only adjust remaining, don't inflate total if budget increased
+    if(newBudget>prevBudget){const diff=newBudget-prevBudget;S.eu_budget=prevBudget+diff;}
+    else{S.eu_budget=Math.max(prevUsed,newBudget);}
+    S.show_voluntary=false;
+    render();syncToday();
+    showToast(`Gate updated: ${newGate} · ${S.eu_budget-S.eu_used} EU remaining`);
   });
 }
 
