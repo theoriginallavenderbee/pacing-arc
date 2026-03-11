@@ -378,7 +378,29 @@ async function init(){
   try{
     const row=await sbGetProfile();
     if(row&&row.checkin){
-      PROFILE=row.checkin;
+      // Merge: Supabase row is source of truth, but if localStorage has fields
+      // that Supabase row is missing (e.g. bb_high saved before a previous upsert bug),
+      // preserve those rather than losing them. Then write the merged result back to Supabase.
+      const sbProfile = row.checkin;
+      let localProfile = null;
+      try{ localProfile = JSON.parse(localStorage.getItem("pac_profile")||"null"); }catch{}
+      if(localProfile){
+        // Fields present in localStorage but absent/default in Supabase row take precedence
+        // This recovers bb_high, bb_low, sleep params that were saved via Settings
+        // but never successfully written to Supabase (due to the now-fixed upsert bug)
+        PROFILE = Object.assign({}, sbProfile, Object.fromEntries(
+          Object.entries(localProfile).filter(([k,v])=>
+            v !== null && v !== undefined && v !== "" &&
+            (sbProfile[k] === undefined || sbProfile[k] === null || sbProfile[k] === "")
+          )
+        ));
+        // If the merge produced a richer profile than Supabase has, write it back now
+        if(JSON.stringify(PROFILE) !== JSON.stringify(sbProfile)){
+          sbSaveProfile(PROFILE).catch(()=>{});
+        }
+      } else {
+        PROFILE = sbProfile;
+      }
       // Keep localStorage in sync so offline fallback is always current
       localStorage.setItem("pac_profile",JSON.stringify(PROFILE));
       const today=await sbGetToday();
@@ -836,8 +858,8 @@ function getTaskCosts(){
 function gateColour(ci){
   let s=0;
   const e=ci.energy??5, bb=ci.battery??50;
-  const bbLow=Number((PROFILE&&PROFILE.bb_low)||5);
-  const bbHigh=Number((PROFILE&&PROFILE.bb_high)||15);
+  const bbLow=Number((PROFILE&&PROFILE.bb_low)??5);
+  const bbHigh=Number((PROFILE&&PROFILE.bb_high)??15);
   const bbMid=Math.round((bbLow+bbHigh)/2);
 
   // Body Battery scoring
@@ -872,8 +894,8 @@ function gateColour(ci){
 function euBudget(ci,bankingMod){
   const e=ci.energy??5;
   const bb=ci.battery??50;
-  const bbLow=Number((PROFILE&&PROFILE.bb_low)||5);
-  const bbHigh=Number((PROFILE&&PROFILE.bb_high)||15);
+  const bbLow=Number((PROFILE&&PROFILE.bb_low)??5);
+  const bbHigh=Number((PROFILE&&PROFILE.bb_high)??15);
   const bbMid=Math.round((bbLow+bbHigh)/2);
   const hrvOk=ci.hrv==="Balanced"||ci.hrv==="Good";
 
@@ -1210,10 +1232,10 @@ function calcBedtime(){
   });
 
   // Profile sleep params (with defaults matching user's profile)
-  const onsetMins=Number((PROFILE&&PROFILE.sleep_onset_mins)||30);
-  const tibHours=Number((PROFILE&&PROFILE.time_in_bed_hours)||8.5);
-  const bufferMins=Number((PROFILE&&PROFILE.functional_buffer_mins)||45);
-  const winddownMins=Number((PROFILE&&PROFILE.winddown_mins)||75);
+  const onsetMins=Number((PROFILE&&PROFILE.sleep_onset_mins)??30);
+  const tibHours=Number((PROFILE&&PROFILE.time_in_bed_hours)??8.5);
+  const bufferMins=Number((PROFILE&&PROFILE.functional_buffer_mins)??45);
+  const winddownMins=Number((PROFILE&&PROFILE.winddown_mins)??75);
 
   // Find first commitment: check tomorrow's events or a default morning start
   // If no events, assume 9:00 as default first-commitment window
@@ -3117,30 +3139,30 @@ function renderSettings(){
       <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Your personal range — check Garmin Connect body battery history. Affects gate scoring.</p>
       <div style="display:flex;gap:10px;margin-bottom:4px">
         <div class="field" style="flex:1"><label class="field-label">Typical low</label>
-          <input type="number" id="s-bb-low" class="text-in" style="width:100%" value="${p.bb_low||5}" placeholder="5"/></div>
+          <input type="number" id="s-bb-low" class="text-in" style="width:100%" value="${p.bb_low??5}" placeholder="5"/></div>
         <div class="field" style="flex:1"><label class="field-label">Typical high</label>
-          <input type="number" id="s-bb-high" class="text-in" style="width:100%" value="${p.bb_high||15}" placeholder="15"/></div>
+          <input type="number" id="s-bb-high" class="text-in" style="width:100%" value="${p.bb_high??15}" placeholder="15"/></div>
       </div>
-      <p style="color:var(--border);font-size:.7rem;margin-bottom:16px">Midpoint = ${Math.round(((p.bb_low||5)+(p.bb_high||15))/2)} · BB below low → 2 pts · BB low–midpoint → 1 pt · BB above midpoint → 0 pts</p>
+      <p style="color:var(--border);font-size:.7rem;margin-bottom:16px">Midpoint = ${Math.round(((p.bb_low??5)+(p.bb_high??15))/2)} · BB below low → 2 pts · BB low–midpoint → 1 pt · BB above midpoint → 0 pts</p>
 
       <h3 style="margin-bottom:12px">Sleep & wind-down profile</h3>
       <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Used by the bedtime calculator on the Plan tab.</p>
       <div style="display:flex;gap:10px;margin-bottom:4px">
         <div class="field" style="flex:1"><label class="field-label">Sleep onset (mins)</label>
-          <input type="number" id="s-onset" class="text-in" style="width:100%" value="${p.sleep_onset_mins||30}" placeholder="30"/></div>
+          <input type="number" id="s-onset" class="text-in" style="width:100%" value="${p.sleep_onset_mins??30}" placeholder="30"/></div>
         <div class="field" style="flex:1"><label class="field-label">Time in bed (hrs)</label>
-          <input type="number" id="s-tib" class="text-in" style="width:100%" value="${p.time_in_bed_hours||8.5}" placeholder="8.5" step="0.5"/></div>
+          <input type="number" id="s-tib" class="text-in" style="width:100%" value="${p.time_in_bed_hours??8.5}" placeholder="8.5" step="0.5"/></div>
       </div>
       <div style="display:flex;gap:10px">
         <div class="field" style="flex:1"><label class="field-label">Functional buffer (mins)</label>
-          <input type="number" id="s-buffer-mins" class="text-in" style="width:100%" value="${p.functional_buffer_mins||45}" placeholder="45"/></div>
+          <input type="number" id="s-buffer-mins" class="text-in" style="width:100%" value="${p.functional_buffer_mins??45}" placeholder="45"/></div>
         <div class="field" style="flex:1"><label class="field-label">Wind-down (mins)</label>
-          <input type="number" id="s-winddown" class="text-in" style="width:100%" value="${p.winddown_mins||75}" placeholder="75"/></div>
+          <input type="number" id="s-winddown" class="text-in" style="width:100%" value="${p.winddown_mins??75}" placeholder="75"/></div>
       </div>
 
       <h3 style="margin-bottom:12px;margin-top:20px">Menstrual cycle</h3>
       <div class="field"><label class="field-label">Cycle length (days)</label>
-        <input type="number" id="s-cycle" class="text-in" style="width:100px" value="${p.cycle_length||28}" placeholder="28"/></div>
+        <input type="number" id="s-cycle" class="text-in" style="width:100px" value="${p.cycle_length??28}" placeholder="28"/></div>
       <div class="field"><label class="field-label">Last period start date</label>
         <input type="date" id="s-period" class="text-in" style="width:180px" value="${p.last_period_start||''}"/></div>
       <p style="color:var(--muted);font-size:.72rem;margin-bottom:20px">Leave blank to disable phase tracking.</p>
