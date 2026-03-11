@@ -117,6 +117,54 @@ const TASK_COSTS_BASE = {
 };
 const STANDING_TASKS = ["Shower","Getting dressed","Breakfast prep","Cooking","Laundry","Short walk outdoors","Grocery shopping"];
 
+// ── TASK TIERS (v6.4) ─────────────────────────────
+// Each tier: { label, eu }. Tasks with no tiers use TASK_COSTS_BASE as their only option.
+const TASK_TIERS_DEFAULT = {
+  "Shower":             { full:{label:"Full shower",eu:3},           reduced:{label:"Hair wash only",eu:2},            minimal:{label:"Sponge wash / dry shampoo",eu:1} },
+  "Getting dressed":    { full:{label:"Full outfit",eu:1},           reduced:{label:"Comfortable home clothes",eu:0} },
+  "Breakfast prep":     { full:{label:"Cook breakfast",eu:2},        reduced:{label:"Assembly — no cooking",eu:1},      minimal:{label:"No-prep eating",eu:0} },
+  "Cooking":            { full:{label:"Full cook",eu:4},             reduced:{label:"Rice cooker / Instant Pot",eu:2},  minimal:{label:"Reheat only",eu:1} },
+  "Dishwashing block":  { full:{label:"Full wash-up",eu:1},          reduced:{label:"One item only",eu:0} },
+  "Laundry":            { full:{label:"Wash + fold",eu:3},           reduced:{label:"Wash on, skip folding",eu:2},      minimal:{label:"Spot clean / refresh spray",eu:1} },
+  "Short walk outdoors":{ full:{label:"Short walk",eu:3},            reduced:{label:"Walk to letterbox",eu:1},          minimal:{label:"Stand outside 5 min",eu:0} },
+  "Medication prep":    { full:{label:"Full prep",eu:3},             reduced:{label:"Pre-sorted pills only",eu:1} },
+  "Light computer work":{ full:{label:"Active work",eu:2},           reduced:{label:"Read only, no output",eu:1} },
+  "Grocery shopping":   { full:{label:"In-store shopping",eu:6},     reduced:{label:"Click and collect only",eu:3} },
+  "Phone call":         { full:{label:"Full call",eu:2},             reduced:{label:"Voice message only",eu:1} },
+};
+
+// Which tier to default to based on gate
+function defaultTierKey(gate){ return gate==="red"?"minimal":gate==="yellow"?"reduced":"full"; }
+
+// Get the tier object to display by default for a task + gate, falling back toward full if tier missing
+function getDefaultTier(taskName, gate){
+  const t = TASK_TIERS_DEFAULT[taskName];
+  if(!t) return null;  // no tiers defined — use TASK_COSTS_BASE
+  const preferred = defaultTierKey(gate);
+  if(preferred==="minimal" && t.minimal) return {key:"minimal", ...t.minimal};
+  if((preferred==="minimal"||preferred==="reduced") && t.reduced) return {key:"reduced", ...t.reduced};
+  return {key:"full", ...t.full};
+}
+
+// Get all defined tiers for a task as array [{key, label, eu}]
+function getAllTiers(taskName){
+  const t = TASK_TIERS_DEFAULT[taskName];
+  if(!t) return [];
+  const out = [];
+  if(t.full)    out.push({key:"full",    ...t.full});
+  if(t.reduced) out.push({key:"reduced", ...t.reduced});
+  if(t.minimal) out.push({key:"minimal", ...t.minimal});
+  return out;
+}
+
+// Effective EU cost for a task on current gate (used in plan generation)
+function tierEuForGate(taskName, gate){
+  const tier = getDefaultTier(taskName, gate);
+  if(tier) return tier.eu;
+  const costs = getTaskCosts();
+  return costs[taskName] ?? 0;
+}
+
 const CRASH_PLAN=[
   {day:"Day 1–2",eu:3,note:"Hygiene & food only. Extended rest. No optional tasks."},
   {day:"Day 3",eu:6,note:"Gradual return. One small task max. Monitor closely."},
@@ -307,6 +355,7 @@ let S={
   wakeup_check_dismissed:false,
   wakeup_check_done:false,
   checkin_submitted_at:null,     // timestamp when morning check-in was submitted
+  task_expanded:{},              // v6.4 — {taskName: true} when user expanded tier options
 };
 
 // ═══════════════════════════════════════════════════
@@ -759,10 +808,11 @@ function getTaskCosts(){
 function gateColour(ci){
   let s=0;
   const e=ci.energy??5, bb=ci.battery??50;
-  // Body Battery — use personalised thresholds from profile
   const bbLow=Number((PROFILE&&PROFILE.bb_low)||5);
   const bbHigh=Number((PROFILE&&PROFILE.bb_high)||15);
   const bbMid=Math.round((bbLow+bbHigh)/2);
+
+  // Body Battery scoring
   if(bb<bbLow)s+=2; else if(bb<bbMid)s+=1;
   // HRV
   if(ci.hrv==="Poor")s+=2; else if(ci.hrv==="Unbalanced")s+=1;
@@ -772,7 +822,23 @@ function gateColour(ci){
   const pem=["Muscle pain","Sore throat/flu feeling","Wired-tired","Sensory sensitivity"];
   const pemCount=(ci.symptoms||[]).filter(x=>pem.includes(x)).length;
   s+=Math.min(2,pemCount);
-  return s>=4?"red":s>=2?"yellow":"green";
+
+  let gate=s>=4?"red":s>=2?"yellow":"green";
+
+  // Fix 1 — Objective floor: strong BB+HRV signals cap how low the gate can go.
+  // Rule A: BB ≥ bb_high AND HRV Balanced/Good → gate cannot be Red from subjective signals alone.
+  //         (PEM ≥2 still allows red regardless.)
+  const bbStrong = bb >= bbHigh;
+  const bbMidOk  = bb >= bbMid;
+  const hrvOk    = ci.hrv==="Balanced"||ci.hrv==="Good";
+  const hasPEM   = pemCount >= 2;
+
+  if(gate==="red" && !hasPEM){
+    if(bbStrong && hrvOk) gate="yellow";        // Rule A: cap at yellow
+    else if(bbMidOk && hrvOk) gate="yellow";    // Rule B: BB mid + HRV ok → also cap at yellow
+  }
+
+  return gate;
 }
 
 function euBudget(ci,bankingMod){
@@ -781,31 +847,27 @@ function euBudget(ci,bankingMod){
   const bbLow=Number((PROFILE&&PROFILE.bb_low)||5);
   const bbHigh=Number((PROFILE&&PROFILE.bb_high)||15);
   const bbMid=Math.round((bbLow+bbHigh)/2);
+  const hrvOk=ci.hrv==="Balanced"||ci.hrv==="Good";
 
-  // Fix 1 — Objective floor: BB determines the base tier, not subjective energy alone.
-  // Subjective energy can lower budget modestly but cannot collapse a good-BB morning.
+  // Fix 1 — Objective floor: BB+HRV anchor the base tier.
+  // If BB ≥ bb_mid AND HRV Balanced: energy ≤3 applies only −10% to typical base,
+  // not a full collapse to low-energy base (6 EU).
   let base;
-  const bbIsGood = bb >= bbMid;   // BB at or above midpoint = objectively okay
-  const bbIsLow  = bb < bbLow;    // BB below low threshold = genuinely depleted
+  const bbMidOk = bb >= bbMid;
+  const objectiveOk = bbMidOk && hrvOk;
 
-  if(bbIsGood){
-    // Good BB day — energy ≤3 only drops by 10%, not full low-energy base
-    if(e>=8) base=DEFAULT_EU.high;
-    else if(e<=3) base=Math.round(DEFAULT_EU.typical*0.90); // modest penalty, not full low
-    else base=DEFAULT_EU.typical;
-  } else if(bbIsLow){
-    // Genuinely low BB — energy confirms or modestly adjusts
-    if(e>=8) base=Math.round(DEFAULT_EU.typical*1.05); // BB low but energy high — split diff
-    else if(e<=3) base=DEFAULT_EU.low;
-    else base=DEFAULT_EU.low;
+  if(objectiveOk && e<=3){
+    // Good objective signals, low subjective energy: modest penalty only
+    base = Math.round(DEFAULT_EU.typical * 0.90);
+  } else if(e>=8){
+    base = DEFAULT_EU.high;
+  } else if(e<=3){
+    base = DEFAULT_EU.low;
   } else {
-    // BB in middle range — energy has normal influence
-    if(e>=8) base=DEFAULT_EU.high;
-    else if(e<=3) base=DEFAULT_EU.low;
-    else base=DEFAULT_EU.typical;
+    base = DEFAULT_EU.typical;
   }
 
-  // v4.1: Sleep score modifier
+  // Sleep score modifier
   const sleep=ci.sleep??65;
   if(sleep<40)base=Math.round(base*.85);
   else if(sleep<60)base=Math.round(base*.95);
@@ -819,10 +881,10 @@ function euBudget(ci,bankingMod){
   const env=ci.env||[];
   if(env.includes("Temp >26°C")||env.includes("UV >7")||env.includes("Sleep <6 hours"))base=Math.round(base*.75);
 
-  // Banking modifier (v4.3)
+  // Banking modifier
   if(bankingMod!==undefined&&bankingMod<1)base=Math.round(base*bankingMod);
 
-  // Gate
+  // Gate multiplier (uses updated gateColour which already has objective floor applied)
   const g=gateColour(ci);
   if(g==="yellow")base=Math.round(base*.65);
   if(g==="red")base=Math.round(base*.4);
@@ -868,7 +930,7 @@ function generatePlan(ci){
   else if(gate==="yellow")restRatio="10 min activity / 30 min rest";
   else if(gate==="red")restRatio="5 min activity / 45 min rest";
 
-  // Priority tasks — use orthostatic-adjusted costs
+  // Priority tasks — use tier-appropriate costs for this gate
   const taskCosts=getTaskCosts();
   const ortho=syms.includes("Dizziness/orthostatic");
   let priorityNames=[];
@@ -882,8 +944,11 @@ function generatePlan(ci){
   let euLeft=eu;
   const fittingTasks=[];
   for(const name of priorityNames){
-    const cost=taskCosts[name];
-    if(cost===undefined)continue;
+    // Use tier-appropriate cost for this gate, fall back to base cost
+    const tierEu = tierEuForGate(name, gate);
+    const baseCost = tierEu ?? taskCosts[name];
+    if(baseCost===undefined) continue;
+    const cost = ortho && STANDING_TASKS.includes(name) ? Math.ceil(baseCost*1.5) : baseCost;
     if(euLeft>=cost){fittingTasks.push([name,cost,ortho&&STANDING_TASKS.includes(name)]);euLeft-=cost;}
     if(fittingTasks.length>=4)break;
   }
@@ -1938,18 +2003,75 @@ function renderTasks(){
       <span>🔵 Structural</span><span>🟢 Execution</span><span>⚪ Passive</span>
     </div>`:""}
     ${S.anchor_soft_lock?`<div style="background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);border-radius:10px;padding:8px 12px;margin-bottom:12px;font-size:.75rem;color:var(--yellow)">Structural tasks paused — a 10-minute break first would help.</div>`:""}
-    ${tasks.map(([name,cost])=>{
-      const isAdj=ortho&&STANDING_TASKS.includes(name);
-      const canDo=rem>=cost&&!cutoff&&S.rest_timer===null&&euPct()<100;
-      const cogMode=TASK_COGNITIVE_MODE[name]||"execution";
-      const cogIcon=cogMode==="structural"?"🔵":cogMode==="passive"?"⚪":"🟢";
-      const cogLock=cogMode==="structural"&&S.anchor_soft_lock;
-      return `<div class="card-sm in" style="margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;opacity:${canDo&&!cogLock?1:.4}">
-        <span style="font-size:.8rem">${name}${isAdj?" ⚠":""} <span style="font-size:.65rem" title="${cogMode}">${cogIcon}</span></span>
-        <div style="display:flex;align-items:center;gap:10px">
-          <span style="font-size:.75rem;color:var(--muted)">${cost} EU</span>
-          <button class="btn btn-primary" data-task="${name}" data-cost="${cost}" style="padding:5px 12px;font-size:.75rem;border-radius:8px" ${canDo&&!cogLock?"":"disabled"}>${cogLock?"Rest first":"Log"}</button>
-        </div></div>`;
+    ${tasks.map(([name, baseCost])=>{
+      const isAdj = ortho && STANDING_TASKS.includes(name);
+      const cogMode = TASK_COGNITIVE_MODE[name] || "execution";
+      const cogIcon = cogMode==="structural"?"🔵":cogMode==="passive"?"⚪":"🟢";
+      const cogLock = cogMode==="structural" && S.anchor_soft_lock;
+      const allTiers = getAllTiers(name);
+      const hasTiers = allTiers.length > 0;
+      const expanded = !!S.task_expanded[name];
+
+      if(!hasTiers){
+        // Single-tier task — original behaviour
+        const cost = isAdj ? Math.ceil(baseCost*1.5) : baseCost;
+        const canDo = rem>=cost && !cutoff && S.rest_timer===null && euPct()<100;
+        return `<div class="card-sm in" style="margin-bottom:7px;opacity:${canDo&&!cogLock?1:.55}">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:.8rem">${name}${isAdj?" ⚠":""} <span style="font-size:.65rem" title="${cogMode}">${cogIcon}</span></span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:.75rem;color:var(--muted)">${cost} EU</span>
+              <button class="btn btn-primary" data-task="${name}" data-cost="${cost}" data-tier="full" style="padding:5px 12px;font-size:.75rem;border-radius:8px" ${canDo&&!cogLock?"":"disabled"}>${cogLock?"Rest first":"Log"}</button>
+            </div>
+          </div>
+        </div>`;
+      }
+
+      // Tiered task
+      const defaultTier = getDefaultTier(name, S.gate||"green");
+      const gateLabel = S.gate==="red"?"red gate":S.gate==="yellow"?"yellow gate":"green gate";
+
+      if(expanded){
+        // Show all tiers
+        return `<div class="card-sm in" style="margin-bottom:7px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:.8rem">${name} <span style="font-size:.65rem" title="${cogMode}">${cogIcon}</span></span>
+            <button class="task-collapse-btn" data-taskname="${name}" style="background:none;border:none;color:var(--muted);font-size:.7rem;cursor:pointer">↑ less</button>
+          </div>
+          ${allTiers.map(tier=>{
+            const adjEu = isAdj ? Math.ceil(tier.eu*1.5) : tier.eu;
+            const canDo = rem>=adjEu && !cutoff && S.rest_timer===null && euPct()<100;
+            const isDefault = tier.key===defaultTier?.key;
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);opacity:${canDo&&!cogLock?1:.45}">
+              <div>
+                <span style="font-size:.77rem;color:${isDefault?"var(--text)":"var(--muted)"}">${tier.label}${isDefault?` <span style="font-size:.6rem;color:var(--accent);background:rgba(56,189,248,.1);padding:1px 5px;border-radius:4px">${gateLabel}</span>`:""}${isAdj&&tier.eu>0?" ⚠":""}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:.72rem;color:var(--muted)">${adjEu} EU</span>
+                <button class="btn btn-primary" data-task="${name}" data-cost="${adjEu}" data-tier="${tier.key}" style="padding:4px 10px;font-size:.72rem;border-radius:7px" ${canDo&&!cogLock?"":"disabled"}>${cogLock?"Rest first":"Log"}</button>
+              </div>
+            </div>`;
+          }).join("")}
+        </div>`;
+      }
+
+      // Collapsed — show default tier with expand option
+      const adjEu = isAdj ? Math.ceil((defaultTier?.eu??0)*1.5) : (defaultTier?.eu??0);
+      const canDo = rem>=adjEu && !cutoff && S.rest_timer===null && euPct()<100;
+      const tierCount = allTiers.length;
+      return `<div class="card-sm in" style="margin-bottom:7px;opacity:${canDo&&!cogLock?1:.55}">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <span style="font-size:.8rem">${name} <span style="font-size:.65rem" title="${cogMode}">${cogIcon}</span></span>
+            <div style="font-size:.67rem;color:var(--muted);margin-top:1px">${defaultTier?.label||""}${isAdj&&adjEu>0?" ⚠":""}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            ${tierCount>1?`<button class="task-expand-btn" data-taskname="${name}" style="background:none;border:none;color:var(--accent);font-size:.68rem;cursor:pointer;white-space:nowrap">↕ ${tierCount} options</button>`:""}
+            <span style="font-size:.75rem;color:var(--muted)">${adjEu} EU</span>
+            <button class="btn btn-primary" data-task="${name}" data-cost="${adjEu}" data-tier="${defaultTier?.key||"full"}" style="padding:5px 12px;font-size:.75rem;border-radius:8px" ${canDo&&!cogLock?"":"disabled"}>${cogLock?"Rest first":"Log"}</button>
+          </div>
+        </div>
+      </div>`;
     }).join("")}
     <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
       <h3 style="margin-bottom:10px">MHMR rules</h3>
@@ -3271,9 +3393,18 @@ function bindMain(){
   document.getElementById("btn-regen-prompt")?.addEventListener("click",()=>{S.meal_prompt=generateMealPrompt();render();});
 
   // Task logging
+  // v6.4 — task tier expand/collapse
+  document.querySelectorAll(".task-expand-btn").forEach(b=>b.addEventListener("click",()=>{
+    S.task_expanded[b.dataset.taskname]=true; render();
+  }));
+  document.querySelectorAll(".task-collapse-btn").forEach(b=>b.addEventListener("click",()=>{
+    S.task_expanded[b.dataset.taskname]=false; render();
+  }));
+
   document.querySelectorAll("[data-task]").forEach(b=>b.addEventListener("click",()=>{
     const cost=Number(b.dataset.cost);
     const taskName=b.dataset.task;
+    const tier=b.dataset.tier||"full";
     if(S.eu_used+cost<=S.eu_budget){
       S.eu_used+=cost;
       // v6.0 — cognitive load tracking
