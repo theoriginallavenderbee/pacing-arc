@@ -3841,6 +3841,7 @@ function bindMain(){
     S.show_quick_add=false;S.quick_add_list=[];
     await saveMealData();render();
   });
+  document.getElementById("btn-copy-prompt")?.addEventListener("click",()=>{
     const p=S.meal_prompt||generateMealPrompt();
     navigator.clipboard.writeText(p).then(()=>{
       const btn=document.getElementById("btn-copy-prompt");
