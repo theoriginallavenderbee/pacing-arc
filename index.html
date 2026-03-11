@@ -236,7 +236,8 @@ function dayOfMonthShort(dateStr){const d=new Date(dateStr+"T12:00:00");return d
 // ═══════════════════════════════════════════════════
 async function sbGet(table,match){
   const params=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
-  const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...SB_HDR,"Accept":"application/json"}});
+  // order by updated_at desc so newest row wins if duplicates exist
+  const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}&order=updated_at.desc&limit=1`,{headers:{...SB_HDR,"Accept":"application/json"}});
   if(!r.ok)return null;
   const d=await r.json();
   return Array.isArray(d)?d[0]||null:null;
@@ -254,8 +255,9 @@ async function sbQuery(table,match,order="created_at"){
   const d=await r.json();
   return Array.isArray(d)?d:[];
 }
-async function sbUpsert(table,data){
-  const r=await fetch(`${SB_URL}/rest/v1/${table}`,{
+async function sbUpsert(table,data,conflictCols="device_id,date"){
+  // PostgREST upsert requires on_conflict param to know which columns to merge on
+  const r=await fetch(`${SB_URL}/rest/v1/${table}?on_conflict=${conflictCols}`,{
     method:"POST",
     headers:{...SB_HDR,"Prefer":"resolution=merge-duplicates,return=representation"},
     body:JSON.stringify(data)
@@ -285,10 +287,28 @@ async function sbUpdate(table,id,data){
 
 async function sbGetProfile(){return sbGet("pacing_arc",{device_id:DEVICE_ID(),date:"profile"});}
 async function sbSaveProfile(p){
-  // Always write to localStorage first — survives network failures and app reloads
+  // Always write to localStorage immediately — survives network failures
   localStorage.setItem("pac_profile",JSON.stringify(p));
-  // Then sync to Supabase
-  await sbUpsert("pacing_arc",{device_id:DEVICE_ID(),date:"profile",checkin:p,updated_at:new Date().toISOString()});
+  // Explicit GET → PATCH if exists, POST if not
+  // This bypasses any unique-constraint ambiguity in upsert
+  const existing=await sbGet("pacing_arc",{device_id:DEVICE_ID(),date:"profile"});
+  if(existing&&existing.id){
+    // Row exists — PATCH it by id
+    const r=await fetch(`${SB_URL}/rest/v1/pacing_arc?id=eq.${existing.id}`,{
+      method:"PATCH",
+      headers:{...SB_HDR,"Prefer":"return=representation"},
+      body:JSON.stringify({checkin:p,updated_at:new Date().toISOString()})
+    });
+    if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbSaveProfile PATCH HTTP ${r.status}: ${err}`);}
+  } else {
+    // No row yet — INSERT
+    const r=await fetch(`${SB_URL}/rest/v1/pacing_arc`,{
+      method:"POST",
+      headers:{...SB_HDR,"Prefer":"return=representation"},
+      body:JSON.stringify({device_id:DEVICE_ID(),date:"profile",checkin:p,updated_at:new Date().toISOString()})
+    });
+    if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbSaveProfile INSERT HTTP ${r.status}: ${err}`);}
+  }
 }
 async function sbGetToday(){return sbGet("pacing_arc",{device_id:DEVICE_ID(),date:todayStr()});}
 async function sbSaveToday(data){await sbUpsert("pacing_arc",{device_id:DEVICE_ID(),date:todayStr(),...data,updated_at:new Date().toISOString()});}
@@ -377,6 +397,7 @@ async function init(){
   fetchWeather().catch(()=>{});
   try{
     const row=await sbGetProfile();
+    console.log("[PacingArc] sbGetProfile raw row:", JSON.stringify(row));
     if(row&&row.checkin){
       // Merge: Supabase row is source of truth, but if localStorage has fields
       // that Supabase row is missing (e.g. bb_high saved before a previous upsert bug),
@@ -403,6 +424,7 @@ async function init(){
       }
       // Keep localStorage in sync so offline fallback is always current
       localStorage.setItem("pac_profile",JSON.stringify(PROFILE));
+      console.log("[PacingArc] PROFILE loaded — bb_low:",PROFILE.bb_low,"bb_high:",PROFILE.bb_high,"cycle_length:",PROFILE.cycle_length,"last_period_start:",PROFILE.last_period_start);
       const today=await sbGetToday();
       if(today){
         S.gate=today.gate||"green";
@@ -1602,6 +1624,16 @@ Please generate a burst-sequenced meal plan for the next 3–4 days. Include:
 4. **What to make first** given today's EU budget of ${euRem} remaining
 
 Please flag any ingredients you'd avoid for fructan sensitivity that I may have missed.`;
+}
+
+function showToast(msg, color){
+  // color: 'green' (success), 'red' (error), 'yellow' (warning)
+  const c={green:"#22c55e",red:"#f87171",yellow:"#facc15"}[color||"green"]||"#22c55e";
+  const t=document.createElement("div");
+  t.style.cssText=`position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1e1e2e;border:1.5px solid ${c};color:${c};padding:10px 20px;border-radius:10px;font-size:.85rem;font-weight:600;z-index:9999;max-width:320px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.5)`;
+  t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(),4000);
 }
 
 function render(){
@@ -3118,9 +3150,16 @@ function renderSettings(){
   const p=PROFILE||{};
   const notifSettings=JSON.parse(localStorage.getItem("pac_notif")||"{}");
   const notifOn=S.notif_permission==="granted";
+  const syncBanner=PROFILE
+    ? `<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:.75rem;color:#86efac">
+        ✓ Profile in memory — bb_low: <b>${p.bb_low??'?'}</b> · bb_high: <b>${p.bb_high??'?'}</b> · cycle: <b>${p.cycle_length??'?'}</b> · period: <b>${p.last_period_start||'?'}</b>
+        <br><span style="color:var(--muted)">Sync: ${SYNC_STATUS==="ok"?"🟢 Supabase connected":"🔴 Offline — local only"}</span>
+       </div>`
+    : `<div style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:.75rem;color:#fca5a5">⚠ No profile loaded in memory</div>`;
   return `<div style="display:flex;flex-direction:column;min-height:100vh" class="safe-t">
     <div class="header"><button class="btn-ghost" id="settings-back">←</button><h2 style="font-size:1rem">Settings & profile</h2></div>
     <div class="section">
+      ${syncBanner}
       <h3 style="margin-bottom:12px">Your profile</h3>
       <div class="field"><label class="field-label">Name</label><input type="text" id="s-name" class="text-in" style="width:100%" value="${p.name||''}" placeholder="Your first name"/></div>
       <div class="field"><label class="field-label">Age</label><input type="number" id="s-age" class="text-in" style="width:100px" value="${p.age||''}" placeholder="e.g. 42"/></div>
@@ -3226,7 +3265,17 @@ function bindSettings(){
       functional_buffer_mins:Number(document.getElementById("s-buffer-mins")?.value)||45,
       winddown_mins:Number(document.getElementById("s-winddown")?.value)||75,
     };
-    try{await sbSaveProfile(PROFILE);SYNC_STATUS="ok";}catch{SYNC_STATUS="off";localStorage.setItem("pac_profile",JSON.stringify(PROFILE));}
+    try{
+      await sbSaveProfile(PROFILE);
+      SYNC_STATUS="ok";
+      console.log("[PacingArc] Profile saved to Supabase:", JSON.stringify(PROFILE));
+      showToast("✓ Profile saved to Supabase","green");
+    }catch(e){
+      SYNC_STATUS="off";
+      localStorage.setItem("pac_profile",JSON.stringify(PROFILE));
+      console.error("[PacingArc] Profile save FAILED:",e.message);
+      showToast("⚠ Supabase save failed — saved locally only\n"+e.message,"red");
+    }
     S.screen="home";render();
   });
   document.getElementById("s-enable-notif")?.addEventListener("click",()=>requestNotifPermission());
