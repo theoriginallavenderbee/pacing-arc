@@ -913,18 +913,17 @@ function gateColour(ci){
   let gate=s>=4?"red":s>=2?"yellow":"green";
 
   // Fix 1 — Objective floor: strong BB+HRV signals cap how low the gate can go.
-  // Rule A: BB ≥ bb_high AND HRV Balanced/Good → gate cannot be Red from subjective signals alone.
-  //         (PEM ≥2 still allows red regardless.)
   const bbStrong = bb >= bbHigh;
   const bbMidOk  = bb >= bbMid;
   const hrvOk    = ci.hrv==="Balanced";
   const hasPEM   = pemCount >= 2;
 
   if(gate==="red" && !hasPEM){
-    if(bbStrong && hrvOk) gate="yellow";        // Rule A: cap at yellow
-    else if(bbMidOk && hrvOk) gate="yellow";    // Rule B: BB mid + HRV ok → also cap at yellow
+    if(bbStrong && hrvOk) gate="yellow";
+    else if(bbMidOk && hrvOk) gate="yellow";
   }
 
+  console.log("[PacingArc][gateColour] bb:",bb,"bbLow:",bbLow,"bbHigh:",bbHigh,"bbMid:",bbMid,"energy:",e,"hrv:",ci.hrv,"pemCount:",pemCount,"rawScore:",s,"gate:",gate,"bbStrong:",bbStrong,"bbMidOk:",bbMidOk,"hrvOk:",hrvOk);
   return gate;
 }
 
@@ -936,15 +935,11 @@ function euBudget(ci,bankingMod){
   const bbMid=Math.round((bbLow+bbHigh)/2);
   const hrvOk=ci.hrv==="Balanced";
 
-  // Fix 1 — Objective floor: BB+HRV anchor the base tier.
-  // If BB ≥ bb_mid AND HRV Balanced: energy ≤3 applies only −10% to typical base,
-  // not a full collapse to low-energy base (6 EU).
   let base;
   const bbMidOk = bb >= bbMid;
   const objectiveOk = bbMidOk && hrvOk;
 
   if(objectiveOk && e<=3){
-    // Good objective signals, low subjective energy: modest penalty only
     base = Math.round(DEFAULT_EU.typical * 0.90);
   } else if(e>=8){
     base = DEFAULT_EU.high;
@@ -953,30 +948,43 @@ function euBudget(ci,bankingMod){
   } else {
     base = DEFAULT_EU.typical;
   }
+  console.log("[PacingArc][euBudget] START — bb:",bb,"bbLow:",bbLow,"bbHigh:",bbHigh,"bbMid:",bbMid,"energy:",e,"hrv:",ci.hrv,"objectiveOk:",objectiveOk,"base after energy tier:",base,"bankingMod:",bankingMod);
 
   // Sleep score modifier
   const sleep=ci.sleep??65;
+  const baseBeforeSleep=base;
   if(sleep<40)base=Math.round(base*.85);
   else if(sleep<60)base=Math.round(base*.95);
+  console.log("[PacingArc][euBudget] sleep:",sleep,"base before:",baseBeforeSleep,"after sleep mod:",base);
 
   // Phase
   const phase=ci.phase||"Not tracking";
+  const baseBeforePhase=base;
   if(phase==="Luteal")base=Math.round(base*.8);
   if(phase==="Late luteal")base=Math.round(base*.75);
+  console.log("[PacingArc][euBudget] phase:",phase,"base before:",baseBeforePhase,"after phase mod:",base);
 
   // Environmental
   const env=ci.env||[];
+  const baseBeforeEnv=base;
   if(env.includes("Temp >26°C")||env.includes("UV >7")||env.includes("Sleep <6 hours"))base=Math.round(base*.75);
+  if(base!==baseBeforeEnv)console.log("[PacingArc][euBudget] env triggered:",env,"after env mod:",base);
 
   // Banking modifier
+  const baseBeforeBanking=base;
   if(bankingMod!==undefined&&bankingMod<1)base=Math.round(base*bankingMod);
+  console.log("[PacingArc][euBudget] banking mod:",bankingMod,"base before:",baseBeforeBanking,"after banking:",base);
 
-  // Gate multiplier (uses updated gateColour which already has objective floor applied)
+  // Gate multiplier
   const g=gateColour(ci);
+  const baseBeforeGate=base;
   if(g==="yellow")base=Math.round(base*.65);
   if(g==="red")base=Math.round(base*.4);
+  console.log("[PacingArc][euBudget] gate:",g,"base before gate mult:",baseBeforeGate,"after gate mult:",base);
 
-  return Math.max(3,base);
+  const result=Math.max(3,base);
+  console.log("[PacingArc][euBudget] FINAL (before memory adj):",result);
+  return result;
 }
 
 function gateEmoji(g){return g==="green"?"🟢":g==="yellow"?"🟡":"🔴";}
