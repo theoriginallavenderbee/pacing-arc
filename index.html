@@ -427,8 +427,6 @@ async function init(){
       console.log("[PacingArc] PROFILE loaded — bb_low:",PROFILE.bb_low,"bb_high:",PROFILE.bb_high,"cycle_length:",PROFILE.cycle_length,"last_period_start:",PROFILE.last_period_start);
       const today=await sbGetToday();
       if(today){
-        S.gate=today.gate||"green";
-        S.eu_budget=today.eu_budget||12;
         S.eu_used=today.eu_used||0;
         S.plan=today.plan?JSON.parse(today.plan):null;
         if(today.checkin)S.ci=today.checkin;
@@ -437,6 +435,23 @@ async function init(){
         if(today.evening_done)S.evening_done=true;
         // Restore crash persistence from carry-forward
         if(!S.in_crash&&today.in_crash)S.in_crash=today.in_crash;
+        // Always recalculate gate and EU from the stored check-in using the
+        // now-loaded PROFILE (correct bb_high etc.), so stale saved values
+        // from a previous deploy with wrong defaults never persist at runtime.
+        if(S.ci&&S.ci.battery!==undefined){
+          const bankingMod=getBankingModForDate(todayStr());
+          S.gate=gateColour(S.ci);
+          S.eu_budget=euBudget(S.ci,bankingMod);
+          if(S.memory_adjustment&&S.memory_adjustment.pct>0){
+            S.eu_budget=Math.max(3,Math.round(S.eu_budget*(1-S.memory_adjustment.pct/100)));
+          } else if(S.memory_adjustment&&S.memory_adjustment.pct<0){
+            S.eu_budget=Math.round(S.eu_budget*(1+Math.abs(S.memory_adjustment.pct)/100));
+          }
+          console.log("[PacingArc] Gate/EU recalculated on load — gate:",S.gate,"eu_budget:",S.eu_budget,"bb_high used:",PROFILE&&PROFILE.bb_high);
+        } else {
+          S.gate=today.gate||"green";
+          S.eu_budget=today.eu_budget||12;
+        }
       }
       // Load recent days for memory
       await loadRecentDays();
