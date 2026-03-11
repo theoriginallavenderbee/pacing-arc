@@ -89,7 +89,7 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// PACING ARC v5.2
+// PACING ARC v8.2
 // v4.1: Sleep score EU, weighted gate, orthostatic costs
 // v4.2: Weather, rest timer, overexertion, time-of-day
 // v4.3: Cycle calc, banking planner, events, forecast
@@ -97,9 +97,14 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 // v5.1: Evening check-in, multi-day memory, panic button,
 //        crash walkthrough, push notifications, trend summary,
 //        data export, device ID sync, setup flow updates
-// v5.2: Bedtime/wake calculator, household maintenance scheduler,
+// v5.2: Bedtime/wake calculator, household maintenance scheduler
 // v6.0: Cognitive layer — te whare tapa whā check-in, CU budget, dissociation risk protocol, project readiness signal
 //        personalised BB gate thresholds, BB+sleep profile in settings
+// v7.0: Meal planning system, pantry quick-add, expiry auto-decrement
+// v8.0: Restorative practices investment model, start_time for events
+// v8.2: EU calibration fix, micro-actions survival tier, activity log,
+//        rest timer EU return, cross-device sync, context-aware home screen,
+//        negative EU tracking (always logs), discretionary EU display
 // ═══════════════════════════════════════════════════
 
 const SB_URL = "https://wtdymvqlugmfwemqyvde.supabase.co";
@@ -432,8 +437,20 @@ async function sbGetEvents(){return sbQuery("pacing_arc_events",{device_id:DEVIC
 async function sbGetTemplates(){return sbQuery("pacing_arc_templates",{device_id:DEVICE_ID()},"created_at");}
 
 async function loadEventsAndTemplates(){
-  try{
-    const [evs,tpls]=await Promise.all([sbGetEvents(),sbGetTemplates()]);
+// ── MICRO-ACTIONS — SURVIVAL TIER (v8.2) ──────────
+// Always visible, always tappable, 0–0.5 EU, never trigger budget warning
+const MICRO_ACTIONS = [
+  {id:"water",name:"Drink water",eu:0,icon:"💧"},
+  {id:"no_prep_food",name:"Eat no-prep food",eu:0.5,icon:"🥜",note:"Peanut butter, crackers — no cooking required"},
+  {id:"body_wipe",name:"Body wipe / freshen up",eu:0.5,icon:"🫧",note:"Flannel or wipes — nervous system reset"},
+  {id:"wash_face",name:"Wash face",eu:0.5,icon:"🌊"},
+  {id:"clean_clothes",name:"Change into clean clothes",eu:0.5,icon:"👕",note:"Clean feeling without shower"},
+  {id:"lie_down",name:"Lie down (not sleep)",eu:0,icon:"🛋",note:"Just horizontal — logs rest without timer"},
+  {id:"one_pose",name:"One yoga pose / stretch",eu:0.5,icon:"🧘",note:"Not a practice — just one movement"},
+  {id:"hair_wash",name:"Hair wash only",eu:1,icon:"🚿",note:"Less than full shower"},
+  {id:"brush_teeth",name:"Brush teeth",eu:0.5,icon:"🦷"},
+  {id:"floss",name:"Floss",eu:0.5,icon:"🦷",note:"Can be done seated"},
+];
     EVENTS=Array.isArray(evs)?evs:[];
     TEMPLATES=Array.isArray(tpls)?tpls:[];
     console.log(`Loaded ${EVENTS.length} events, ${TEMPLATES.length} templates for ${DEVICE_ID()}`);
@@ -510,6 +527,11 @@ let S={
   wakeup_check_done:false,
   checkin_submitted_at:null,     // timestamp when morning check-in was submitted
   task_expanded:{},              // v6.4 — {taskName: true} when user expanded tier options
+  // v8.2 — activity log
+  activity_log:[],               // [{task, cost, time, retroactive}] — logged today
+  show_activity_log:false,       // collapsible activity log visible
+  show_log_rest:false,           // manual rest log panel
+  pending_rest_return:null,      // {eu, mins} — offered after rest timer completes
 };
 
 // ═══════════════════════════════════════════════════
@@ -565,7 +587,7 @@ async function init(){
           S.gate=gateColour(S.ci);
           S.eu_budget=euBudget(S.ci,bankingMod);
           if(S.memory_adjustment&&S.memory_adjustment.pct>0){
-            S.eu_budget=Math.max(3,Math.round(S.eu_budget*(1-S.memory_adjustment.pct/100)));
+            S.eu_budget=Math.max(5,Math.round(S.eu_budget*(1-S.memory_adjustment.pct/100)));
           } else if(S.memory_adjustment&&S.memory_adjustment.pct<0){
             S.eu_budget=Math.round(S.eu_budget*(1+Math.abs(S.memory_adjustment.pct)/100));
           }
@@ -617,6 +639,23 @@ async function init(){
   if(S.rest_timer_end)startRestTimerTick();
   // Check notification permission status
   if("Notification" in window)S.notif_permission=Notification.permission;
+
+  // v8.2 — Cross-device sync: re-fetch on app focus
+  document.addEventListener("visibilitychange",async()=>{
+    if(document.visibilityState==="visible"&&S.screen==="main"&&PROFILE){
+      try{
+        const today=await sbGetToday();
+        if(today){
+          // Only update EU if more has been used elsewhere (don't rewind)
+          if(today.eu_used>S.eu_used)S.eu_used=today.eu_used;
+          if(today.checkin&&Object.keys(today.checkin).length>Object.keys(S.ci||{}).length)S.ci=today.checkin;
+          if(today.evening_done)S.evening_done=true;
+          if(today.midday_done)S.midday_done=true;
+          render();
+        }
+      }catch{}
+    }
+  });
 }
 
 async function syncToday(){
@@ -1098,15 +1137,20 @@ function euBudget(ci,bankingMod){
   if(eaten==="Not yet")base=Math.round(base*.92);        // −8%
   else if(eaten==="Coffee / drink only")base=Math.round(base*.95); // −5%
 
-  // Banking modifier
+  // Banking modifier + gate multiplier: cap combined effect at 55% of phase-adjusted base
+  const phaseAdjustedBase = base; // capture before banking/gate
   if(bankingMod!==undefined&&bankingMod<1)base=Math.round(base*bankingMod);
 
   // Gate multiplier
   const g=gateColour(ci);
-  if(g==="yellow")base=Math.round(base*.65);
+  if(g==="yellow")base=Math.round(base*.75);  // v8.2: raised from 0.65
   if(g==="red")base=Math.round(base*.4);
 
-  const result=Math.max(3,base);
+  // Cap: banking + gate together cannot reduce below 55% of phase-adjusted base
+  const combinedFloor = Math.round(phaseAdjustedBase * 0.55);
+  if(base < combinedFloor) base = combinedFloor;
+
+  const result=Math.max(5,base);  // v8.2: floor raised from 3 to 5
   return result;
 }
 
@@ -1302,6 +1346,11 @@ function startRestTimerTick(){
       S.rest_timer_end=null;
       // Vibrate/notify
       if(navigator.vibrate)navigator.vibrate([200,100,200]);
+      // v8.2 — offer log + EU return
+      const gate=S.gate||"green";
+      const mins=gate==="green"?20:gate==="yellow"?30:45;
+      const euReturn=gate==="green"?1:gate==="yellow"?1.5:2;
+      S.pending_rest_return={eu:euReturn,mins};
       render();
       return;
     }
@@ -1822,14 +1871,23 @@ function renderLoading(){
 function renderHome(){
   const name=PROFILE&&PROFILE.name?`, ${PROFILE.name}`:"";
   const todayLoaded=S.plan!==null;
+  const checkinDone=S.ci&&S.ci.energy!==undefined;
+  const gateStatus=checkinDone?`<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:16px;padding:10px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;font-size:.82rem" class="in">
+    <span>${gateEmoji(S.gate)} <span style="color:var(--subtle)">${S.gate} gate</span></span>
+    <span style="color:var(--border)">·</span>
+    <span style="color:${euColor()};font-weight:500">${S.eu_budget-S.eu_used>0?`${S.eu_budget-S.eu_used} EU remaining`:`${S.eu_used-S.eu_budget} EU over budget`}</span>
+  </div>`:"";
   return `<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 22px;text-align:center" class="safe-t safe-b">
     <div style="font-size:3rem;margin-bottom:20px;animation:in .5s ease">🌿</div>
     <h1 style="font-size:2rem;margin-bottom:8px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text" class="in">Pacing Arc</h1>
     <p style="color:var(--muted);font-size:.875rem;max-width:320px;margin:0 auto 8px;line-height:1.7" class="in">Good to see you${name}.</p>
-    <p style="color:var(--border);font-size:.72rem;margin-bottom:28px" class="in">${syncDotHtml()}<span class="sync-indicator">${SYNC_STATUS==="ok"?"Synced":SYNC_STATUS==="off"?"Offline":"…"}</span></p>
+    <p style="color:var(--border);font-size:.72rem;margin-bottom:20px" class="in">${syncDotHtml()}<span class="sync-indicator">${SYNC_STATUS==="ok"?"Synced":SYNC_STATUS==="off"?"Offline":"…"}</span></p>
     ${WEATHER?`<div style="font-size:.78rem;color:var(--subtle);margin-bottom:16px" class="in">🌡 ${WEATHER.temp}°C · ☀ UV ${WEATHER.uv} · 🌅 ${WEATHER.sunrise} · 🌇 ${WEATHER.sunset}</div>`:""}
+    ${gateStatus}
     <div style="width:100%;max-width:360px;display:flex;flex-direction:column;gap:10px" class="in">
-      <button class="btn btn-primary" id="btn-start" style="width:100%">🌅 Morning check-in</button>
+      ${checkinDone
+        ?`<button class="btn btn-secondary" id="btn-voluntary-home" style="width:100%;border-color:rgba(148,163,184,.3)!important;color:var(--subtle);font-size:.875rem">↺ Energy shift check-in</button>`
+        :`<button class="btn btn-primary" id="btn-start" style="width:100%">🌅 Morning check-in</button>`}
       ${todayLoaded?`<button class="btn btn-secondary" id="btn-resume" style="width:100%">📋 Resume today's plan</button>`:""}
       <button class="btn btn-secondary" id="btn-events" style="width:100%">📅 Events & planner</button>
       ${S.in_crash?`<button class="btn" id="btn-crash" style="width:100%;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.3)!important;color:var(--red)">🚨 Crash containment</button>`:""}
@@ -1842,6 +1900,9 @@ function bindHome(){
     // Pre-fill phase and env from auto-calcs
     if(phaseTodayAuto()&&!S.ci.phase)S.ci.phase=phaseTodayAuto();
     S.screen="checkin";S.ci_step=0;render();
+  });
+  document.getElementById("btn-voluntary-home")?.addEventListener("click",()=>{
+    S.screen="main";S.tab="plan";S.show_voluntary=true;S.voluntary_step=0;S.voluntary_data={};render();
   });
   document.getElementById("btn-resume")?.addEventListener("click",()=>{S.screen="main";S.tab="plan";render();});
   document.getElementById("btn-crash")?.addEventListener("click",()=>{S.screen="main";S.tab="crash";render();});
@@ -2000,12 +2061,13 @@ function bindCheckin(){
     S.eu_budget=euBudget(S.ci,bankingMod);
     // Apply multi-day memory adjustment if any
     if(S.memory_adjustment&&S.memory_adjustment.pct>0){
-      S.eu_budget=Math.max(3,Math.round(S.eu_budget*(1-S.memory_adjustment.pct/100)));
+      S.eu_budget=Math.max(5,Math.round(S.eu_budget*(1-S.memory_adjustment.pct/100)));
     } else if(S.memory_adjustment&&S.memory_adjustment.pct<0){
       // Recovery bonus
       S.eu_budget=Math.round(S.eu_budget*(1+Math.abs(S.memory_adjustment.pct)/100));
     }
     S.eu_used=0;
+    S.activity_log=[];  // v8.2 — fresh log for new day
     S.drift_signals=driftCheck(S.ci);
     { const cs=S.ci.symptoms||[]; let cs_score=0;
   if(cs.includes("Muscle pain"))cs_score+=1; if(cs.includes("Muscle tightness"))cs_score+=0.5;
@@ -2059,6 +2121,7 @@ function renderMain(){
   if(S.show_voluntary)sheets.push(renderVoluntarySheet());
   if(S.show_panic)sheets.push(renderPanicSheet());
   if(S.show_wakeup_check)sheets.push(renderWakeupCheckSheet());
+  if(S.show_log_rest)sheets.push(renderLogRestSheet());
 
   return `<div style="display:flex;flex-direction:column;height:100vh">
     <div class="header">
@@ -2091,7 +2154,7 @@ function renderPlan(){
 
   return `<div class="section">
     ${todBanner?`<div style="background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:12px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;font-size:.78rem;color:var(--subtle)" class="in"><span>${todBanner.icon}</span><span style="color:${todBanner.col}">${todBanner.msg}</span></div>`:""}
-    ${overexertion==="red"?`<div class="overexertion-banner in" style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25)"><span>🔴</span><span style="font-size:.8rem;color:var(--red)">EU budget reached — rest now. No more tasks today.</span></div>`:""}
+    ${overexertion==="red"?`<div class="overexertion-banner in" style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25)"><span>🔴</span><div><span style="font-size:.8rem;color:var(--red)">EU budget reached — rest now.</span><div style="font-size:.72rem;color:var(--muted);margin-top:2px">Still here. Still tracking. Rest is the task now — micro-actions and water are always available below.</div></div></div>`:""}
     ${overexertion==="amber"?`<div class="overexertion-banner in" style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2)"><span>⚠️</span><span style="font-size:.8rem;color:var(--yellow)">80% of EU budget used — consider stopping for today.</span></div>`:""}
     ${strainFlag?`<div style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;gap:10px" class="in"><span>⚠️</span><div><div style="font-size:.8rem;font-weight:500;color:var(--red);margin-bottom:2px">Accumulated strain detected</div><div style="font-size:.75rem;color:var(--subtle)">3+ consecutive hard days — prioritise rest today even if you feel okay.</div></div></div>`:""}
     ${getTahaWhanauFlag()?`<div style="background:rgba(129,140,248,.06);border:1px solid rgba(129,140,248,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;gap:10px" class="in"><span>🌒</span><div><div style="font-size:.8rem;font-weight:500;color:var(--accent2);margin-bottom:2px">Connection has felt low for a few days</div><div style="font-size:.75rem;color:var(--subtle)">Taha whānau matters. Nothing to fix — just noticed.</div></div></div>`:""}
@@ -2109,8 +2172,13 @@ function renderPlan(){
         <div style="font-size:1.3rem">${gateEmoji(S.gate)}</div><div style="font-size:.7rem;color:var(--subtle)">${S.gate}</div>
       </div>
       <div class="card-sm" style="flex:1;text-align:center">
-        <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">EU budget</div>
-        <div style="font-size:1.3rem;font-weight:500;color:${euColor()}">${S.eu_budget}</div><div style="font-size:.7rem;color:var(--subtle)">${S.eu_used} used</div>
+        <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">EU today</div>
+        <div style="font-size:1.3rem;font-weight:500;color:${euColor()}">${S.eu_budget}</div>
+        ${(()=>{
+          const todayCommitted=getEventsForDate(todayStr()).reduce((s,e)=>s+(e.eu_cost||0),0);
+          const disc=Math.max(0,S.eu_budget-todayCommitted);
+          return todayCommitted>0?`<div style="font-size:.62rem;color:var(--muted);line-height:1.4">${todayCommitted} committed<br>${disc} free</div>`:`<div style="font-size:.7rem;color:var(--subtle)">${S.eu_used} used</div>`;
+        })()}
       </div>
       <div class="card-sm" style="flex:1;text-align:center">
         <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">HR ceiling</div>
@@ -2194,6 +2262,7 @@ function renderPlan(){
       </div>
     </div>`:""}
     ${renderTrendSummary()}
+    ${renderActivityLog()}
     ${supps.length?`<div class="in"><h3 style="margin-bottom:10px">Supplements today</h3>${supps.map(s=>`<div class="card-sm" style="margin-bottom:7px;font-size:.8rem;color:var(--subtle)">${s.trim()}</div>`).join("")}</div>`:""}
     <div style="margin-top:16px;margin-bottom:8px">
       <button class="btn in" id="btn-panic" style="width:100%;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3)!important;color:var(--red);font-weight:500">🛑 Stop — I need to rest</button>
@@ -2250,6 +2319,35 @@ function renderForecastStrip(){
   </div>`;
 }
 
+// ── ACTIVITY LOG (v8.2) ───────────────────────────
+function renderActivityLog(){
+  if(!S.activity_log||!S.activity_log.length)return "";
+  const open=S.show_activity_log;
+  const total=S.activity_log.reduce((s,e)=>s+e.cost,0);
+  return `<div class="card in" style="margin-bottom:14px">
+    <button id="toggle-activity-log" style="background:none;border:none;width:100%;display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:0">
+      <h3 style="margin:0">Today's log</h3>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:.75rem;color:var(--muted)">${S.activity_log.length} items · ${total} EU</span>
+        <span style="color:var(--muted);font-size:.8rem">${open?"▲":"▼"}</span>
+      </div>
+    </button>
+    ${open?`<div style="margin-top:10px">
+      ${S.activity_log.slice().reverse().map(entry=>`
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
+          <div>
+            <span style="font-size:.8rem">${entry.task}</span>
+            ${entry.retroactive?`<span style="font-size:.6rem;color:var(--muted);margin-left:4px">(retroactive)</span>`:""}
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:.72rem;color:var(--muted)">${entry.time}</span>
+            <span style="font-size:.72rem;color:${entry.cost===0?"var(--green)":entry.cost<0?"var(--accent)":"var(--muted)"}">${entry.cost===0?"free":entry.cost<0?`+${Math.abs(entry.cost)} EU returned`:`${entry.cost} EU`}</span>
+          </div>
+        </div>`).join("")}
+    </div>`:""}
+  </div>`;
+}
+
 // ── TASKS TAB ─────────────────────────────────────
 function renderTasks(){
   const taskCosts=getTaskCosts();
@@ -2259,6 +2357,17 @@ function renderTasks(){
   const ortho=S.ci&&(S.ci.symptoms||[]).includes("Dizziness/orthostatic");
 
   return `<div class="section">
+    ${S.pending_rest_return?`<div class="rest-timer-banner" style="background:rgba(52,211,153,.08);border-color:rgba(52,211,153,.3)">
+      <span style="font-size:1.2rem">✅</span>
+      <div style="flex:1">
+        <div style="font-size:.82rem;font-weight:500;color:var(--green)">Rest complete — ${S.pending_rest_return.mins} min</div>
+        <div style="font-size:.74rem;color:var(--muted)">Log to return +${S.pending_rest_return.eu} EU</div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button id="btn-confirm-rest-return" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.3);border-radius:8px;color:var(--green);font-size:.75rem;padding:5px 10px;cursor:pointer">Log rest</button>
+        <button id="btn-skip-rest-return" style="background:none;border:none;color:var(--muted);font-size:.75rem;cursor:pointer">Skip</button>
+      </div>
+    </div>`:""}
     ${S.rest_timer!==null?`<div class="rest-timer-banner">
       <span style="font-size:1.2rem">⏱</span>
       <div style="flex:1">
@@ -2420,6 +2529,18 @@ function renderTasks(){
           </div>
         </div>`;
       }).join("")}
+    </div>
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+      <h3 style="margin-bottom:4px">Survival tier</h3>
+      <p style="font-size:.73rem;color:var(--muted);margin-bottom:10px;line-height:1.5">Always available — never triggers budget warning. You are always allowed to do these.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+        ${MICRO_ACTIONS.map(a=>`<button class="micro-action-btn" data-micro="${a.id}" data-cost="${a.eu}" style="display:flex;align-items:center;gap:5px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;font-size:.76rem;color:var(--subtle);cursor:pointer" title="${a.note||a.name}">
+          <span>${a.icon}</span><span>${a.name}</span>${a.eu===0?`<span style="font-size:.62rem;color:var(--green);background:rgba(52,211,153,.1);padding:1px 5px;border-radius:4px">free</span>`:`<span style="font-size:.62rem;color:var(--muted)">${a.eu} EU</span>`}
+        </button>`).join("")}
+      </div>
+      <button id="btn-log-rest" style="display:flex;align-items:center;gap:6px;background:rgba(56,189,248,.07);border:1px solid rgba(56,189,248,.2);border-radius:10px;padding:7px 12px;font-size:.76rem;color:var(--accent);cursor:pointer;width:100%">
+        🛋 Log a rest break
+      </button>
     </div>
     <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
       <h3 style="margin-bottom:10px">MHMR rules</h3>
@@ -3274,6 +3395,27 @@ function renderWakeupCheckSheet(){
   </div>`;
 }
 
+function renderLogRestSheet(){
+  return `<div class="sheet-overlay" id="log-rest-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <h2 style="font-size:1rem">Log a rest break</h2>
+        <button id="close-log-rest" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:.74rem;color:var(--muted);margin-bottom:18px;line-height:1.6">Rest is an active pacing intervention. Log it to return some EU and track your pattern.</p>
+      <div class="field">
+        <label class="field-label">Duration</label>
+        <div class="choices" style="flex-direction:row;flex-wrap:wrap;gap:7px">
+          ${[15,20,30,45,60].map(m=>`<button class="choice rest-dur-btn" data-mins="${m}" style="flex:0;padding:8px 14px">${m} min</button>`).join("")}
+        </div>
+      </div>
+      <div id="rest-return-preview" style="font-size:.78rem;color:var(--muted);margin-bottom:16px;padding:8px 12px;background:var(--bg3);border-radius:8px;display:none"></div>
+      <button class="btn btn-primary" id="submit-log-rest" style="width:100%" disabled>Log rest</button>
+    </div>
+  </div>`;
+}
+
 function renderCrash(){
   if(S.show_crash_walkthrough)return renderCrashWalkthrough();
   return `<div class="section">
@@ -4064,34 +4206,100 @@ function bindMain(){
     const cost=Number(b.dataset.cost);
     const taskName=b.dataset.task;
     const tier=b.dataset.tier||"full";
-    if(S.eu_used+cost<=S.eu_budget){
-      S.eu_used+=cost;
-      // v6.0 — cognitive load tracking
-      const cogMode = TASK_COGNITIVE_MODE[taskName] || "execution";
-      if(cogMode === "structural"){
-        // Deduct CU: default to structural_short (1 CU) for logged tasks
-        // User can't specify duration at log time, so use conservative 1 CU
-        const cuCost = 1;
+    S.eu_used+=cost;  // v8.2: always track, even in deficit
+    // v8.2 — add to activity log
+    const now=new Date();
+    const timeStr=now.getHours().toString().padStart(2,"0")+":"+now.getMinutes().toString().padStart(2,"0");
+    if(!S.activity_log)S.activity_log=[];
+    S.activity_log.push({task:taskName+(tier&&tier!=="full"?` (${tier})`:""),cost,time:timeStr,retroactive:false});
+    // v6.0 — cognitive load tracking
+    const cogMode = TASK_COGNITIVE_MODE[taskName] || "execution";
+    if(cogMode === "structural"){
+      const cuCost = 1;
+      S.cu_used = Math.min(S.cu_budget, S.cu_used + cuCost);
+      if(S.structural_task_start === null) S.structural_task_start = Date.now();
+    } else {
+      if(cogMode !== "structural") S.structural_task_start = null;
+      if(cogMode === "execution"){
+        const cuCost = 0.5;
         S.cu_used = Math.min(S.cu_budget, S.cu_used + cuCost);
-        if(S.structural_task_start === null) S.structural_task_start = Date.now();
-      } else {
-        // Execution/passive clears the structural task timer (they had a break)
-        if(cogMode !== "structural") S.structural_task_start = null;
-        if(cogMode === "execution"){
-          const cuCost = 0.5;
-          S.cu_used = Math.min(S.cu_budget, S.cu_used + cuCost);
-        }
       }
-      // Re-evaluate dissociation risk and project readiness after each task
-      S.dissociation_risk = checkDissociationRisk();
-      S.project_readiness = calcProjectReadiness();
-      startRestTimer();
-      render();syncToday();
     }
+    // Re-evaluate dissociation risk and project readiness after each task
+    S.dissociation_risk = checkDissociationRisk();
+    S.project_readiness = calcProjectReadiness();
+    startRestTimer();
+    render();syncToday();
   }));
   document.getElementById("btn-skip-rest")?.addEventListener("click",()=>{
     if(restTimerInterval)clearInterval(restTimerInterval);
     S.rest_timer=null;S.rest_timer_end=null;render();
+  });
+
+  // v8.2 — rest return logging
+  document.getElementById("btn-confirm-rest-return")?.addEventListener("click",()=>{
+    if(!S.pending_rest_return)return;
+    const {eu,mins}=S.pending_rest_return;
+    // Return EU (capped — can't go below zero used)
+    const maxReturn=Math.min(eu,S.eu_used);
+    S.eu_used=Math.max(0,S.eu_used-maxReturn);
+    const now=new Date();
+    const t=now.getHours().toString().padStart(2,"0")+":"+now.getMinutes().toString().padStart(2,"0");
+    if(!S.activity_log)S.activity_log=[];
+    S.activity_log.push({task:`Rest break (${mins} min)`,cost:-maxReturn,time:t,retroactive:false});
+    S.pending_rest_return=null;
+    render();syncToday();
+    showToast(`Rest logged · +${maxReturn} EU returned`,"green");
+  });
+  document.getElementById("btn-skip-rest-return")?.addEventListener("click",()=>{
+    S.pending_rest_return=null;render();
+  });
+
+  // v8.2 — activity log toggle
+  document.getElementById("toggle-activity-log")?.addEventListener("click",()=>{S.show_activity_log=!S.show_activity_log;render();});
+
+  // v8.2 — micro-actions
+  document.querySelectorAll(".micro-action-btn").forEach(b=>b.addEventListener("click",()=>{
+    const cost=Number(b.dataset.cost);
+    const name=MICRO_ACTIONS.find(a=>a.id===b.dataset.micro)?.name||b.dataset.micro;
+    S.eu_used=Math.max(0,S.eu_used+cost); // micro costs are tiny — allow but track
+    const now=new Date();
+    const t=now.getHours().toString().padStart(2,"0")+":"+now.getMinutes().toString().padStart(2,"0");
+    if(!S.activity_log)S.activity_log=[];
+    S.activity_log.push({task:name,cost,time:t,retroactive:false});
+    render();syncToday();
+    if(cost===0)showToast(`✓ ${name}`,"green");
+  }));
+
+  // v8.2 — log a rest (manual)
+  document.getElementById("btn-log-rest")?.addEventListener("click",()=>{S.show_log_rest=true;render();});
+  document.getElementById("close-log-rest")?.addEventListener("click",()=>{S.show_log_rest=false;render();});
+  document.getElementById("log-rest-overlay")?.addEventListener("click",e=>{if(e.target.id==="log-rest-overlay"){S.show_log_rest=false;render();}});
+  let _logRestMins=null;
+  document.querySelectorAll(".rest-dur-btn").forEach(b=>b.addEventListener("click",()=>{
+    _logRestMins=Number(b.dataset.mins);
+    document.querySelectorAll(".rest-dur-btn").forEach(x=>{x.style.borderColor="";x.style.color="";});
+    b.style.borderColor="var(--accent)";b.style.color="var(--accent)";
+    const gate=S.gate||"green";
+    const euReturn=gate==="green"?(_logRestMins>=20?1:0):gate==="yellow"?(_logRestMins>=30?1.5:_logRestMins>=20?1:0):(_logRestMins>=45?2:_logRestMins>=30?1.5:0);
+    const preview=document.getElementById("rest-return-preview");
+    if(preview){preview.style.display="block";preview.textContent=`${_logRestMins} min rest → +${euReturn} EU returned`;}
+    const submitBtn=document.getElementById("submit-log-rest");
+    if(submitBtn)submitBtn.disabled=false;
+    submitBtn._eu=euReturn;submitBtn._mins=_logRestMins;
+  }));
+  document.getElementById("submit-log-rest")?.addEventListener("click",function(){
+    const eu=this._eu??0;
+    const mins=this._mins??20;
+    const maxReturn=Math.min(eu,S.eu_used);
+    S.eu_used=Math.max(0,S.eu_used-maxReturn);
+    const now=new Date();
+    const t=now.getHours().toString().padStart(2,"0")+":"+now.getMinutes().toString().padStart(2,"0");
+    if(!S.activity_log)S.activity_log=[];
+    S.activity_log.push({task:`Rest break (${mins} min)`,cost:-maxReturn,time:t,retroactive:false});
+    S.show_log_rest=false;
+    render();syncToday();
+    showToast(`Rest logged · +${maxReturn} EU returned`,"green");
   });
 
   // Crash tab
@@ -4451,7 +4659,7 @@ function bindVoluntarySheet(){
     const newBudgetRaw=euBudget(updatedCi,bankingMod);
     // Apply same memory adjustments as morning
     let newBudget=newBudgetRaw;
-    if(S.memory_adjustment&&S.memory_adjustment.pct>0)newBudget=Math.max(3,Math.round(newBudget*(1-S.memory_adjustment.pct/100)));
+    if(S.memory_adjustment&&S.memory_adjustment.pct>0)newBudget=Math.max(5,Math.round(newBudget*(1-S.memory_adjustment.pct/100)));
     else if(S.memory_adjustment&&S.memory_adjustment.pct<0)newBudget=Math.round(newBudget*(1+Math.abs(S.memory_adjustment.pct)/100));
     S.gate=newGate;
     // Preserve used EU — only adjust remaining, don't inflate total if budget increased
@@ -4529,7 +4737,7 @@ function bindMiddaySheet(){
     const pem=["Muscle pain","Sore throat/flu feeling","Wired-tired","Sensory sensitivity"];
     const newPemCount=newSyms.filter(x=>pem.includes(x)).length;
     if((morningEnergy-midEnergy)>=3||newPemCount>=2){
-      S.eu_budget=Math.max(3,Math.round(S.eu_budget*.7));
+      S.eu_budget=Math.max(5,Math.round(S.eu_budget*.7));
       const newGate=gateColour({...S.ci,energy:midEnergy,symptoms:[...(S.ci.symptoms||[]),...newSyms]});
       if(newGate==="red"&&S.gate!=="red")S.gate=newGate;
       S.plan=generatePlan({...S.ci,energy:midEnergy});
@@ -4544,7 +4752,7 @@ function bindMiddaySheet(){
 // PWA
 // ═══════════════════════════════════════════════════
 if("serviceWorker" in navigator){
-  const sw=`const C="pacing-arc-v5.2";self.addEventListener("install",e=>{self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))));self.clients.claim();});self.addEventListener("fetch",e=>{if(e.request.url.includes("supabase.co")||e.request.url.includes("fonts.")||e.request.url.includes("open-meteo"))return;e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cl=res.clone();caches.open(C).then(c=>c.put(e.request,cl));return res;})));});`;
+  const sw=`const C="pacing-arc-v8.2";self.addEventListener("install",e=>{self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))));self.clients.claim();});self.addEventListener("fetch",e=>{if(e.request.url.includes("supabase.co")||e.request.url.includes("fonts.")||e.request.url.includes("open-meteo"))return;e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cl=res.clone();caches.open(C).then(c=>c.put(e.request,cl));return res;})));});`;
   navigator.serviceWorker.register(URL.createObjectURL(new Blob([sw],{type:"application/javascript"}))).catch(()=>{});
 }
 const mf={name:"Pacing Arc",short_name:"Pacing Arc",start_url:"./",display:"standalone",background_color:"#060910",theme_color:"#060910",icons:[{src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23060910'/%3E%3Ctext x='96' y='130' font-size='100' text-anchor='middle'%3E%F0%9F%8C%BF%3C/text%3E%3C/svg%3E",sizes:"192x192",type:"image/svg+xml"}]};
