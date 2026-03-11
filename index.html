@@ -173,9 +173,10 @@ function getDeviceId(){
 // Always read from localStorage — never freeze as a constant
 // This means switching device ID in Settings takes effect immediately without code changes
 function DEVICE_ID(){return getDeviceId();}
-function todayStr(){return new Date().toISOString().slice(0,10);}
-function dateAddDays(dateStr,n){const d=new Date(dateStr);d.setDate(d.getDate()+n);return d.toISOString().slice(0,10);}
-function daysBetween(a,b){return Math.round((new Date(b)-new Date(a))/(1000*60*60*24));}
+function localDateStr(d){const dt=d||new Date();const y=dt.getFullYear();const m=String(dt.getMonth()+1).padStart(2,"0");const day=String(dt.getDate()).padStart(2,"0");return `${y}-${m}-${day}`;}
+function todayStr(){return localDateStr();}
+function dateAddDays(dateStr,n){const d=new Date(dateStr+"T12:00:00");d.setDate(d.getDate()+n);return localDateStr(d);}
+function daysBetween(a,b){return Math.round((new Date(b+"T12:00:00")-new Date(a+"T12:00:00"))/(1000*60*60*24));}
 function dayOfWeekShort(dateStr){return new Date(dateStr+"T12:00:00").toLocaleDateString('en-NZ',{weekday:'short'});}
 function dayOfMonthShort(dateStr){const d=new Date(dateStr+"T12:00:00");return d.getDate()+' '+d.toLocaleDateString('en-NZ',{month:'short'});}
 
@@ -301,6 +302,11 @@ let S={
   component_edit:null,
   meal_prompt:null,              // generated prompt string
   pantry_audit_dismissed:false,
+  // v6.3 — wake-up check
+  show_wakeup_check:false,
+  wakeup_check_dismissed:false,
+  wakeup_check_done:false,
+  checkin_submitted_at:null,     // timestamp when morning check-in was submitted
 };
 
 // ═══════════════════════════════════════════════════
@@ -770,9 +776,34 @@ function gateColour(ci){
 }
 
 function euBudget(ci,bankingMod){
-  let base=DEFAULT_EU.typical;
   const e=ci.energy??5;
-  if(e>=8)base=DEFAULT_EU.high; else if(e<=3)base=DEFAULT_EU.low;
+  const bb=ci.battery??50;
+  const bbLow=Number((PROFILE&&PROFILE.bb_low)||5);
+  const bbHigh=Number((PROFILE&&PROFILE.bb_high)||15);
+  const bbMid=Math.round((bbLow+bbHigh)/2);
+
+  // Fix 1 — Objective floor: BB determines the base tier, not subjective energy alone.
+  // Subjective energy can lower budget modestly but cannot collapse a good-BB morning.
+  let base;
+  const bbIsGood = bb >= bbMid;   // BB at or above midpoint = objectively okay
+  const bbIsLow  = bb < bbLow;    // BB below low threshold = genuinely depleted
+
+  if(bbIsGood){
+    // Good BB day — energy ≤3 only drops by 10%, not full low-energy base
+    if(e>=8) base=DEFAULT_EU.high;
+    else if(e<=3) base=Math.round(DEFAULT_EU.typical*0.90); // modest penalty, not full low
+    else base=DEFAULT_EU.typical;
+  } else if(bbIsLow){
+    // Genuinely low BB — energy confirms or modestly adjusts
+    if(e>=8) base=Math.round(DEFAULT_EU.typical*1.05); // BB low but energy high — split diff
+    else if(e<=3) base=DEFAULT_EU.low;
+    else base=DEFAULT_EU.low;
+  } else {
+    // BB in middle range — energy has normal influence
+    if(e>=8) base=DEFAULT_EU.high;
+    else if(e<=3) base=DEFAULT_EU.low;
+    else base=DEFAULT_EU.typical;
+  }
 
   // v4.1: Sleep score modifier
   const sleep=ci.sleep??65;
@@ -1320,6 +1351,44 @@ function shouldShowPantryAuditPrompt(){
   return S.gate !== "red" && S.eu_budget >= 4;
 }
 
+// v6.3 — Wake-up check: visible 20–90 min after morning check-in
+function shouldShowWakeupCheck(){
+  if(!S.checkin_submitted_at) return false;
+  if(S.wakeup_check_dismissed || S.wakeup_check_done) return false;
+  const mins = (Date.now() - S.checkin_submitted_at) / 60000;
+  return mins >= 20 && mins <= 90;
+}
+
+function applyWakeupRefresh(newBb, newEnergy, newSymptoms){
+  // Rebuild ci with updated values, recalculate gate + EU
+  const refreshedCi = {...S.ci, battery:newBb, energy:newEnergy, symptoms:newSymptoms||S.ci.symptoms||[]};
+  const newGate = gateColour(refreshedCi);
+  const bankingMod = calcBankingModifier ? calcBankingModifier() : undefined;
+  const newBudget = euBudget(refreshedCi, bankingMod);
+
+  // Store refresh record
+  const refresh = {
+    time: new Date().toISOString(),
+    battery: newBb, energy: newEnergy, symptoms: newSymptoms||[],
+    gate_before: S.gate, eu_before: S.eu_budget,
+    gate_after: newGate, eu_after: newBudget
+  };
+  S.ci.refresh = refresh;
+
+  // Only increase EU — don't penalise for updating
+  if(newBudget > S.eu_budget){
+    const diff = newBudget - S.eu_budget;
+    S.eu_budget = S.eu_budget + diff; // add to remaining, don't refund spent
+  }
+  // Gate always updates if it changed
+  S.gate = newGate;
+  S.drift_signals = driftCheck(refreshedCi);
+  S.project_readiness = calcProjectReadiness();
+  S.dissociation_risk = checkDissociationRisk();
+  S.wakeup_check_done = true;
+  syncToday();
+}
+
 function generateMealPrompt(){
   const gate = S.gate || "green";
   const euBudgetNow = S.eu_budget || 12;
@@ -1590,7 +1659,8 @@ function renderCheckin(){
     </div>
     <div style="padding:16px 18px;max-width:600px;width:100%;margin:0 auto" class="safe-b">
       <button class="btn btn-primary" id="ci-next" style="width:100%" ${canGo?"":"disabled"}>${isLast?"✨ Get my plan":"Next →"}</button>
-      ${isLast?`<p style="color:var(--muted);font-size:.75rem;text-align:center;margin-top:8px">Plans field is optional</p>`:""}
+      ${isLast?`<p style="color:var(--muted);font-size:.75rem;text-align:center;margin-top:8px">Plans field is optional</p>
+      <p style="color:var(--muted);font-size:.72rem;text-align:center;margin-top:6px;line-height:1.5">This is your starting estimate — if you feel more awake after 20 minutes, you can update it from your plan.</p>`:""}
     </div>
   </div>`;
 }
@@ -1637,6 +1707,9 @@ function bindCheckin(){
     S.anchor_dismissed_count=0;
     S.anchor_soft_lock=false;
     S.screen="main";S.tab="plan";
+    S.checkin_submitted_at=Date.now();
+    S.wakeup_check_dismissed=false;
+    S.wakeup_check_done=false;
     render();
     syncToday();
   });
@@ -1668,6 +1741,7 @@ function renderMain(){
   if(S.show_midday)sheets.push(renderMiddaySheet());
   if(S.show_evening)sheets.push(renderEveningSheet());
   if(S.show_panic)sheets.push(renderPanicSheet());
+  if(S.show_wakeup_check)sheets.push(renderWakeupCheckSheet());
 
   return `<div style="display:flex;flex-direction:column;height:100vh">
     <div class="header">
@@ -1754,6 +1828,19 @@ function renderPlan(){
     ${isEvening&&S.evening_done?`<div style="font-size:.75rem;color:var(--muted);text-align:center;margin-bottom:12px">✓ Evening check-in complete</div>`:""}
     ${renderBedtimeCard()}
     ${renderMaintenanceSuggestions()}
+    ${shouldShowWakeupCheck()?`<div class="card in" style="margin-bottom:14px;background:rgba(129,140,248,.05);border-color:rgba(129,140,248,.2)">
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <span style="font-size:1.1rem">🌅</span>
+        <div style="flex:1">
+          <div style="font-size:.82rem;font-weight:500;color:var(--accent2);margin-bottom:2px">Feeling more awake?</div>
+          <div style="font-size:.74rem;color:var(--muted);margin-bottom:10px">Sleep inertia can make things look lower than they are. If you feel different now, update your reading and your budget will adjust.</div>
+          <div style="display:flex;gap:8px">
+            <button id="btn-open-wakeup" class="btn btn-primary" style="flex:1;padding:8px;font-size:.78rem">Update my reading</button>
+            <button id="btn-dismiss-wakeup" class="btn btn-secondary" style="padding:8px 12px;font-size:.78rem">I'm okay</button>
+          </div>
+        </div>
+      </div>
+    </div>`:""}
     ${shouldShowPantryAuditPrompt()?`<div class="card in" style="margin-bottom:14px;background:rgba(52,211,153,.05);border-color:rgba(52,211,153,.2)">
       <div style="display:flex;align-items:flex-start;gap:10px">
         <span style="font-size:1.1rem">🌿</span>
@@ -1761,7 +1848,7 @@ function renderPlan(){
           <div style="font-size:.82rem;font-weight:500;color:var(--green);margin-bottom:2px">Good day for a pantry audit</div>
           <div style="font-size:.74rem;color:var(--muted);margin-bottom:10px">Takes about 10 minutes and sets up your meal planning. 2 EU · execution mode.</div>
           <div style="display:flex;gap:8px">
-            <button id="btn-go-pantry" class="btn btn-primary" style="flex:1;padding:8px;font-size:.78rem">Start audit</button>
+            <button id="btn-go-pantry" class="btn btn-primary" style="flex:1;padding:8px;font-size:.78px">Start audit</button>
             <button id="btn-dismiss-pantry" class="btn btn-secondary" style="padding:8px 12px;font-size:.78rem">Later</button>
           </div>
         </div>
@@ -2505,6 +2592,46 @@ function renderComponentSheet(){
   </div>`;
 }
 
+// ── WAKE-UP CHECK SHEET (v6.3) ────────────────────
+function renderWakeupCheckSheet(){
+  const bb = S.ci?.battery ?? 10;
+  const energy = S.ci?.energy ?? 5;
+  const symptoms = S.ci?.symptoms || [];
+  const PEM_SYMS = ["Muscle pain","Sore throat/flu feeling","Wired-tired","Sensory sensitivity","Dizziness/orthostatic","Headache","Nausea","Brain fog"];
+
+  return `<div class="sheet-overlay" id="wakeup-sheet-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <h2 style="font-size:1rem">Update your reading</h2>
+        <button id="close-wakeup-sheet" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:.74rem;color:var(--muted);margin-bottom:18px;line-height:1.6">This is just your updated opening position — your EU already used isn't affected.</p>
+
+      <div class="field">
+        <label class="field-label">Body Battery now <span id="wakeup-bb-val" style="color:var(--accent);font-weight:500">${bb}</span></label>
+        <input type="range" id="wakeup-bb" min="0" max="100" value="${bb}" style="margin-top:6px"/>
+        <div style="display:flex;justify-content:space-between;font-size:.65rem;color:var(--muted);margin-top:2px"><span>0</span><span>50</span><span>100</span></div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Energy right now <span id="wakeup-energy-val" style="color:var(--accent);font-weight:500">${energy}</span></label>
+        <input type="range" id="wakeup-energy" min="0" max="10" value="${energy}" style="margin-top:6px"/>
+        <div style="display:flex;justify-content:space-between;font-size:.65rem;color:var(--muted);margin-top:2px"><span>0</span><span>5</span><span>10</span></div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Any new symptoms? <span style="font-weight:300;color:var(--muted)">(optional)</span></label>
+        <div class="tags" style="margin-top:6px">
+          ${PEM_SYMS.map(s=>`<button class="tag wakeup-sym-btn${symptoms.includes(s)?" sel":""}" data-sym="${s}" style="font-size:.72rem;padding:5px 10px">${s}</button>`).join("")}
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="submit-wakeup-check" style="width:100%;margin-top:4px">Update reading</button>
+    </div>
+  </div>`;
+}
+
 function renderCrash(){
   if(S.show_crash_walkthrough)return renderCrashWalkthrough();
   return `<div class="section">
@@ -3022,6 +3149,25 @@ function bindMain(){
       loadEventsAndTemplates().then(()=>render());
     }
   }));
+
+  // Wake-up check prompt buttons (Plan tab)
+  document.getElementById("btn-open-wakeup")?.addEventListener("click",()=>{S.show_wakeup_check=true;render();});
+  document.getElementById("btn-dismiss-wakeup")?.addEventListener("click",()=>{S.wakeup_check_dismissed=true;render();});
+
+  // Wake-up check sheet
+  document.getElementById("close-wakeup-sheet")?.addEventListener("click",()=>{S.show_wakeup_check=false;render();});
+  document.getElementById("wakeup-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="wakeup-sheet-overlay"){S.show_wakeup_check=false;render();}});
+  document.getElementById("wakeup-bb")?.addEventListener("input",e=>{const v=document.getElementById("wakeup-bb-val");if(v)v.textContent=e.target.value;});
+  document.getElementById("wakeup-energy")?.addEventListener("input",e=>{const v=document.getElementById("wakeup-energy-val");if(v)v.textContent=e.target.value;});
+  document.querySelectorAll(".wakeup-sym-btn").forEach(b=>b.addEventListener("click",()=>{b.classList.toggle("sel");}));
+  document.getElementById("submit-wakeup-check")?.addEventListener("click",()=>{
+    const bb=Number(document.getElementById("wakeup-bb")?.value??S.ci?.battery??10);
+    const energy=Number(document.getElementById("wakeup-energy")?.value??S.ci?.energy??5);
+    const syms=[...document.querySelectorAll(".wakeup-sym-btn.sel")].map(b=>b.dataset.sym);
+    applyWakeupRefresh(bb,energy,syms);
+    S.show_wakeup_check=false;
+    render();
+  });
 
   // Pantry audit prompt buttons (Plan tab)
   document.getElementById("btn-go-pantry")?.addEventListener("click",()=>{S.tab="meals";S.meal_tab="inventory";render();});
