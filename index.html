@@ -386,6 +386,13 @@ let S={
   component_edit:null,
   meal_prompt:null,              // generated prompt string
   pantry_audit_dismissed:false,
+  // v7.0 — post-cook
+  show_postcook:false,           // post-cook ingredient checklist sheet visible
+  postcook_comp_id:null,         // which component was just "used"
+  postcook_checked:{},           // {ingredient_id: true} — selected to mark as used
+  // v7.0 — quick-add
+  show_quick_add:false,          // quick-add pantry panel visible
+  quick_add_list:[],             // [{id, name, category, form, quantity, location, expiry_date, days_to_expiry, urgency, high_fructan, omega_ratio, _incomplete}]
   // v6.3 — wake-up check
   show_wakeup_check:false,
   wakeup_check_dismissed:false,
@@ -1464,8 +1471,19 @@ function getSuggestedMaintenance(remainingEU){
 // ═══════════════════════════════════════════════════
 // MEAL PLANNING DATA LAYER (v6.1)
 // ═══════════════════════════════════════════════════
-let INGREDIENT_INVENTORY = [];   // [{id, name, category, form, quantity, urgency, days_to_expiry, high_fructan, omega_ratio, location}]
-let READY_COMPONENTS = [];       // [{id, name, component_type, servings_remaining, urgency, days_to_expiry, eu_to_use}]
+let INGREDIENT_INVENTORY = [];   // [{id, name, category, form, quantity, urgency, expiry_date, days_to_expiry(computed), high_fructan, omega_ratio, location}]
+let READY_COMPONENTS = [];       // [{id, name, component_type, servings_remaining, urgency, expiry_date, days_to_expiry(computed), eu_to_use}]
+
+// ── Expiry helpers (v7.0) ─────────────────────────
+function expiryDateFromDays(days){ if(days==null||days==="")return null; const d=new Date(); d.setDate(d.getDate()+Number(days)); return d.toISOString().slice(0,10); }
+function daysFromExpiryDate(dateStr){ if(!dateStr)return null; const diff=Math.round((new Date(dateStr)-new Date(new Date().toISOString().slice(0,10)))/(1000*60*60*24)); return diff; }
+function migrateExpiry(item){ // convert old days_to_expiry → expiry_date if not yet migrated
+  if(!item.expiry_date && item.days_to_expiry!=null){ item.expiry_date=expiryDateFromDays(item.days_to_expiry); }
+  // always recompute days_to_expiry dynamically
+  item.days_to_expiry = item.expiry_date ? daysFromExpiryDate(item.expiry_date) : null;
+  return item;
+}
+function migrateAllExpiry(){ INGREDIENT_INVENTORY=INGREDIENT_INVENTORY.map(migrateExpiry); READY_COMPONENTS=READY_COMPONENTS.map(migrateExpiry); }
 
 async function loadMealData(){
   try{
@@ -1483,6 +1501,7 @@ async function loadMealData(){
       if(local){ const d=JSON.parse(local); INGREDIENT_INVENTORY=d.ingredients||[]; READY_COMPONENTS=d.components||[]; }
     }catch{}
   }
+  migrateAllExpiry(); // v7.0 — convert legacy days_to_expiry → expiry_date, recompute dynamically
 }
 
 async function saveMealData(){
@@ -2730,7 +2749,10 @@ function renderMeals(){
     body = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <div style="font-size:.8rem;color:var(--muted)">${INGREDIENT_INVENTORY.length} ingredient${INGREDIENT_INVENTORY.length!==1?"s":""}</div>
-        <button id="btn-add-ingredient" class="btn btn-primary" style="padding:7px 14px;font-size:.78rem">+ Add ingredient</button>
+        <div style="display:flex;gap:8px">
+          <button id="btn-quick-add" class="btn btn-secondary" style="padding:7px 12px;font-size:.78rem">⚡ Quick-add</button>
+          <button id="btn-add-ingredient" class="btn btn-primary" style="padding:7px 14px;font-size:.78rem">+ Add ingredient</button>
+        </div>
       </div>
       ${INGREDIENT_INVENTORY.length === 0 ? `<div class="card" style="text-align:center;padding:20px;color:var(--muted);font-size:.8rem">
         No ingredients yet. Tap <strong>+ Add ingredient</strong> to start your pantry audit.
@@ -2822,6 +2844,8 @@ function renderMeals(){
     ${body}
     ${S.show_add_ingredient ? renderIngredientSheet() : ""}
     ${S.show_add_component ? renderComponentSheet() : ""}
+    ${S.show_postcook ? renderPostCookSheet() : ""}
+    ${S.show_quick_add ? renderQuickAddPanel() : ""}
   </div>`;
 }
 
@@ -2856,7 +2880,7 @@ function renderIngredientSheet(){
       </div>
       <div style="display:flex;gap:10px">
         <div class="field" style="flex:1"><label class="field-label">Days to expiry</label>
-          <input type="number" id="ing-expiry" class="text-in" style="width:100%" value="${ing.days_to_expiry!=null?ing.days_to_expiry:""}" placeholder="blank if shelf-stable"/></div>
+          <input type="number" id="ing-expiry" class="text-in" style="width:100%" value="${ing.expiry_date ? Math.max(0,daysFromExpiryDate(ing.expiry_date)) : ""}" placeholder="blank if shelf-stable"/></div>
         <div class="field" style="flex:1"><label class="field-label">Omega ratio</label>
           <select id="ing-omega" class="text-in" style="width:100%">${omegas.map(o=>`<option value="${o}"${ing.omega_ratio===o?" selected":""}>${o}</option>`).join("")}</select></div>
       </div>
@@ -2893,7 +2917,7 @@ function renderComponentSheet(){
       </div>
       <div style="display:flex;gap:10px">
         <div class="field" style="flex:1"><label class="field-label">Days to expiry</label>
-          <input type="number" id="comp-expiry" class="text-in" style="width:100%" value="${comp.days_to_expiry!=null?comp.days_to_expiry:""}" placeholder="blank if unknown"/></div>
+          <input type="number" id="comp-expiry" class="text-in" style="width:100%" value="${comp.expiry_date ? Math.max(0,daysFromExpiryDate(comp.expiry_date)) : ""}" placeholder="blank if unknown"/></div>
         <div class="field" style="flex:1"><label class="field-label">EU to assemble</label>
           <input type="number" id="comp-eu" class="text-in" style="width:100%" value="${comp.eu_to_use||0}" step="0.5" min="0"/></div>
       </div>
@@ -2907,7 +2931,109 @@ function renderComponentSheet(){
   </div>`;
 }
 
-// ── WAKE-UP CHECK SHEET (v6.3) ────────────────────
+// ── POST-COOK SHEET (v7.0) ────────────────────────────
+function renderPostCookSheet(){
+  const comp = READY_COMPONENTS.find(c=>c.id===S.postcook_comp_id);
+  if(!comp) return "";
+  return `<div class="sheet-overlay" id="postcook-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="font-size:1rem">Used a serving of ${escH(comp.name)}</h2>
+        <button id="close-postcook" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px;line-height:1.5">Which pantry ingredients did you use to make this? Tap to mark as used up.</p>
+      <div style="max-height:260px;overflow-y:auto;margin-bottom:14px">
+        ${INGREDIENT_INVENTORY.map(i=>{
+          const checked=!!S.postcook_checked[i.id];
+          return `<div class="card-sm postcook-ing${checked?" postcook-sel":""}" data-iid="${i.id}" style="margin-bottom:6px;cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 12px;${checked?"border-color:var(--green);background:rgba(52,211,153,.07)":""}">
+            <div style="width:18px;height:18px;border-radius:50%;border:2px solid ${checked?"var(--green)":"var(--border)"};background:${checked?"var(--green)":"transparent"};flex-shrink:0;display:flex;align-items:center;justify-content:center">
+              ${checked?`<svg width="10" height="10" viewBox="0 0 10 10"><polyline points="1.5,5 4,7.5 8.5,2.5" fill="none" stroke="white" stroke-width="2"/></svg>`:""}
+            </div>
+            <div style="flex:1">
+              <div style="font-size:.82rem;font-weight:500">${escH(i.name)}</div>
+              <div style="font-size:.7rem;color:var(--muted)">${i.quantity||""}${i.location?` · ${i.location}`:""}${i.days_to_expiry!=null?` · ${i.days_to_expiry}d`:""}</div>
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="postcook-skip" class="btn btn-secondary" style="flex:1">Skip — just use serving</button>
+        <button id="postcook-confirm" class="btn btn-primary" style="flex:1">Done</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── QUICK-ADD PANEL (v7.0) ────────────────────────────
+function parseQuickAddInput(raw){
+  // Parse: "name" | "name, location, N days" | "name, location, Nkg/g/etc"
+  const parts = raw.split(",").map(p=>p.trim()).filter(Boolean);
+  const name = parts[0]||"";
+  let location=null, expiry_days=null, quantity=null;
+  const locs=["fridge","freezer","pantry","counter"];
+  for(let i=1;i<parts.length;i++){
+    const p=parts[i].toLowerCase();
+    if(locs.includes(p)){ location=p; continue; }
+    const dayMatch=p.match(/^(\d+)\s*d(ay)?s?$/); if(dayMatch){ expiry_days=Number(dayMatch[1]); continue; }
+    const qtyMatch=p.match(/^[\d.]+\s*(g|kg|ml|l|oz|lb|x|pack|bag|tin|can|bottle|tray|bunch|head)?$/i); if(qtyMatch){ quantity=parts[i]; continue; }
+    if(!quantity) quantity=parts[i];
+  }
+  const expiry_date = expiry_days!=null ? expiryDateFromDays(expiry_days) : null;
+  const days_to_expiry = expiry_date ? daysFromExpiryDate(expiry_date) : null;
+  const missing=[];
+  if(!location) missing.push("location");
+  if(!expiry_date) missing.push("expiry");
+  if(!quantity) missing.push("quantity");
+  return {
+    id: mealDataId(), name, category:"other", form:"fresh",
+    quantity:quantity||"", location:location||"", expiry_date, days_to_expiry,
+    urgency:(days_to_expiry!=null&&days_to_expiry<=3)?"urgent":"normal",
+    high_fructan:false, omega_ratio:"unknown",
+    _missing: missing
+  };
+}
+
+function renderQuickAddPanel(){
+  const list = S.quick_add_list||[];
+  return `<div class="sheet-overlay" id="quickadd-overlay">
+    <div class="sheet" style="max-height:90vh;overflow-y:auto">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h2 style="font-size:1rem">Quick-add ingredients</h2>
+        <button id="close-quickadd" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:.76rem;color:var(--muted);margin-bottom:10px;line-height:1.5">One ingredient per line. Minimum: name only. Add more detail to fill fields automatically.</p>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <input type="text" id="quick-add-input" class="text-in" style="flex:1;font-size:.82rem" placeholder="e.g. silken tofu, fridge, 4 days"/>
+        <button id="quick-add-btn" class="btn btn-primary" style="padding:10px 16px;white-space:nowrap">+ Add</button>
+      </div>
+      ${list.length===0?`<div style="text-align:center;padding:20px;font-size:.78rem;color:var(--muted)">Items you add will appear here. Tap any item to fill in missing details.</div>`:`
+        <div style="margin-bottom:14px">
+          ${list.map((ing,idx)=>{
+            const incomplete = ing._missing && ing._missing.length>0;
+            return `<div class="card-sm in quickadd-item" data-idx="${idx}" style="margin-bottom:6px;cursor:pointer;${incomplete?"border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.04)":"border-color:rgba(52,211,153,.25);background:rgba(52,211,153,.04)"}">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between">
+                <div style="flex:1">
+                  <div style="font-size:.82rem;font-weight:500">${escH(ing.name)}
+                    ${incomplete?`<span style="font-size:.65rem;color:rgba(251,191,36,.8);margin-left:6px">tap to fill</span>`:`<span style="font-size:.65rem;color:var(--green);margin-left:6px">✓ complete</span>`}
+                  </div>
+                  <div style="font-size:.7rem;color:var(--muted);margin-top:2px">
+                    ${[ing.quantity,ing.location,ing.days_to_expiry!=null?ing.days_to_expiry+"d":null].filter(Boolean).join(" · ")||"name only"}
+                    ${incomplete?`<span style="color:rgba(251,191,36,.7)"> · missing: ${ing._missing.join(", ")}</span>`:""}
+                  </div>
+                </div>
+                <button class="quickadd-remove btn-ghost" data-idx="${idx}" style="padding:2px 6px;font-size:.9rem;color:var(--muted);flex-shrink:0">×</button>
+              </div>
+            </div>`;
+          }).join("")}
+        </div>
+        <button id="quickadd-save-all" class="btn btn-primary" style="width:100%;margin-bottom:8px">Save ${list.length} ingredient${list.length!==1?"s":""} to pantry</button>
+        <p style="font-size:.68rem;color:var(--muted);text-align:center">Incomplete entries are saved — you can fill in missing details later.</p>
+      `}
+    </div>
+  </div>`;
+}
 function renderWakeupCheckSheet(){
   const bb = S.ci?.battery ?? 10;
   const energy = S.ci?.energy ?? 5;
@@ -3553,6 +3679,7 @@ function bindMain(){
 
   // Meals tab sub-nav and actions
   document.querySelectorAll(".meal-tab-btn").forEach(b=>b.addEventListener("click",()=>{S.meal_tab=b.dataset.mealTab;S.meal_prompt=null;render();}));
+  document.getElementById("btn-quick-add")?.addEventListener("click",()=>{S.show_quick_add=true;S.quick_add_list=[];render();});
   document.getElementById("btn-add-ingredient")?.addEventListener("click",()=>{S.ingredient_edit={};S.show_add_ingredient=true;render();});
   document.getElementById("btn-add-component")?.addEventListener("click",()=>{S.component_edit={};S.show_add_component=true;render();});
 
@@ -3563,6 +3690,7 @@ function bindMain(){
     const name=document.getElementById("ing-name")?.value?.trim();
     if(!name){alert("Name required.");return;}
     const expStr=document.getElementById("ing-expiry")?.value;
+    const expiry_date = expStr ? expiryDateFromDays(expStr) : (S.ingredient_edit?.expiry_date||null);
     const ing={
       id: S.ingredient_edit?.id || mealDataId(),
       name,
@@ -3570,8 +3698,9 @@ function bindMain(){
       form: document.getElementById("ing-form")?.value||"fresh",
       quantity: document.getElementById("ing-qty")?.value||"",
       location: document.getElementById("ing-loc")?.value||"fridge",
-      days_to_expiry: expStr?Number(expStr):null,
-      urgency: (expStr&&Number(expStr)<=3)?"urgent":"normal",
+      expiry_date,
+      days_to_expiry: expiry_date ? daysFromExpiryDate(expiry_date) : null,
+      urgency: (expiry_date && daysFromExpiryDate(expiry_date)<=3)?"urgent":"normal",
       high_fructan: document.getElementById("ing-fructan")?.checked||false,
       omega_ratio: document.getElementById("ing-omega")?.value||"unknown"
     };
@@ -3601,12 +3730,14 @@ function bindMain(){
     const name=document.getElementById("comp-name")?.value?.trim();
     if(!name){alert("Name required.");return;}
     const expStr=document.getElementById("comp-expiry")?.value;
+    const expiry_date = expStr ? expiryDateFromDays(expStr) : (S.component_edit?.expiry_date||null);
     const comp={
       id: S.component_edit?.id || mealDataId(),
       name,
       component_type: document.getElementById("comp-type")?.value||"other",
       servings_remaining: Number(document.getElementById("comp-servings")?.value)||1,
-      days_to_expiry: expStr?Number(expStr):null,
+      expiry_date,
+      days_to_expiry: expiry_date ? daysFromExpiryDate(expiry_date) : null,
       eu_to_use: Number(document.getElementById("comp-eu")?.value)||0,
       urgency: S.component_edit?.urgency||"normal"
     };
@@ -3630,16 +3761,86 @@ function bindMain(){
   document.querySelectorAll(".comp-use").forEach(b=>b.addEventListener("click",async()=>{
     const comp=READY_COMPONENTS.find(c=>c.id===b.dataset.id);
     if(!comp)return;
-    if(comp.servings_remaining<=1){
-      READY_COMPONENTS=READY_COMPONENTS.filter(c=>c.id!==b.dataset.id);
-    }else{
-      comp.servings_remaining-=1;
+    // If pantry has ingredients, offer the post-cook flow
+    if(INGREDIENT_INVENTORY.length>0){
+      S.postcook_comp_id=b.dataset.id;
+      S.postcook_checked={};
+      S.show_postcook=true;
+      render();
+    } else {
+      // No pantry — just decrement directly
+      if(comp.servings_remaining<=1){
+        READY_COMPONENTS=READY_COMPONENTS.filter(c=>c.id!==b.dataset.id);
+      }else{
+        comp.servings_remaining-=1;
+      }
+      await saveMealData();render();
     }
-    await saveMealData();render();
   }));
 
-  // Prompt tab
-  document.getElementById("btn-copy-prompt")?.addEventListener("click",()=>{
+  // Post-cook sheet (v7.0)
+  document.getElementById("close-postcook")?.addEventListener("click",()=>{S.show_postcook=false;S.postcook_comp_id=null;S.postcook_checked={};render();});
+  document.getElementById("postcook-overlay")?.addEventListener("click",e=>{if(e.target.id==="postcook-overlay"){S.show_postcook=false;S.postcook_comp_id=null;S.postcook_checked={};render();}});
+  document.querySelectorAll(".postcook-ing").forEach(el=>el.addEventListener("click",()=>{
+    const iid=el.dataset.iid;
+    S.postcook_checked[iid]=!S.postcook_checked[iid];
+    render();
+  }));
+  document.getElementById("postcook-skip")?.addEventListener("click",async()=>{
+    const comp=READY_COMPONENTS.find(c=>c.id===S.postcook_comp_id);
+    if(comp){ if(comp.servings_remaining<=1){READY_COMPONENTS=READY_COMPONENTS.filter(c=>c.id!==comp.id);}else{comp.servings_remaining-=1;} }
+    S.show_postcook=false;S.postcook_comp_id=null;S.postcook_checked={};
+    await saveMealData();render();
+  });
+  document.getElementById("postcook-confirm")?.addEventListener("click",async()=>{
+    const comp=READY_COMPONENTS.find(c=>c.id===S.postcook_comp_id);
+    if(comp){ if(comp.servings_remaining<=1){READY_COMPONENTS=READY_COMPONENTS.filter(c=>c.id!==comp.id);}else{comp.servings_remaining-=1;} }
+    // Remove or decrement checked ingredients
+    const checked=S.postcook_checked;
+    INGREDIENT_INVENTORY=INGREDIENT_INVENTORY.filter(i=>!checked[i.id]);
+    S.show_postcook=false;S.postcook_comp_id=null;S.postcook_checked={};
+    await saveMealData();render();
+  });
+
+  // Quick-add panel (v7.0)
+  document.getElementById("close-quickadd")?.addEventListener("click",()=>{S.show_quick_add=false;S.quick_add_list=[];render();});
+  document.getElementById("quickadd-overlay")?.addEventListener("click",e=>{if(e.target.id==="quickadd-overlay"){S.show_quick_add=false;S.quick_add_list=[];render();}});
+  document.getElementById("quick-add-btn")?.addEventListener("click",()=>{
+    const inp=document.getElementById("quick-add-input");
+    const val=inp?.value?.trim();
+    if(!val)return;
+    const parsed=parseQuickAddInput(val);
+    S.quick_add_list=[...S.quick_add_list,parsed];
+    inp.value="";
+    render();
+  });
+  document.getElementById("quick-add-input")?.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){e.preventDefault();document.getElementById("quick-add-btn")?.click();}
+  });
+  document.querySelectorAll(".quickadd-item").forEach(el=>el.addEventListener("click",e=>{
+    if(e.target.classList.contains("quickadd-remove"))return;
+    const idx=Number(el.dataset.idx);
+    const ing=S.quick_add_list[idx];
+    if(!ing)return;
+    // Open ingredient edit sheet pre-filled
+    S.ingredient_edit={...ing};
+    S.show_add_ingredient=true;
+    render();
+  }));
+  document.querySelectorAll(".quickadd-remove").forEach(btn=>btn.addEventListener("click",e=>{
+    e.stopPropagation();
+    const idx=Number(btn.dataset.idx);
+    S.quick_add_list=S.quick_add_list.filter((_,i)=>i!==idx);
+    render();
+  }));
+  document.getElementById("quickadd-save-all")?.addEventListener("click",async()=>{
+    for(const ing of S.quick_add_list){
+      const {_missing,...clean}=ing;
+      INGREDIENT_INVENTORY.push(clean);
+    }
+    S.show_quick_add=false;S.quick_add_list=[];
+    await saveMealData();render();
+  });
     const p=S.meal_prompt||generateMealPrompt();
     navigator.clipboard.writeText(p).then(()=>{
       const btn=document.getElementById("btn-copy-prompt");
