@@ -213,9 +213,12 @@ const EVENT_TYPE_EU = {medical:5,social:4,travel:12,work:6,rest:0};
 const EVENT_TYPE_EU_TRAVEL = {medical_travel:10};
 
 // ── DEVICE + DATE ─────────────────────────────────
+const KNOWN_DEVICE_ID = "dev_ka001kaimlmmk5smyc";
 function getDeviceId(){
   let id=localStorage.getItem("pac_device_id");
-  if(!id){id="dev_"+Math.random().toString(36).slice(2)+Date.now().toString(36);localStorage.setItem("pac_device_id",id);}
+  // Seed the known device ID if localStorage is fresh (new browser/PWA install)
+  // This ensures profile is always found in Supabase even after clearing local data
+  if(!id){id=KNOWN_DEVICE_ID;localStorage.setItem("pac_device_id",id);}
   return id;
 }
 // Always read from localStorage — never freeze as a constant
@@ -252,11 +255,13 @@ async function sbQuery(table,match,order="created_at"){
   return Array.isArray(d)?d:[];
 }
 async function sbUpsert(table,data){
-  await fetch(`${SB_URL}/rest/v1/${table}`,{
+  const r=await fetch(`${SB_URL}/rest/v1/${table}`,{
     method:"POST",
-    headers:{...SB_HDR,"Prefer":"resolution=merge-duplicates"},
+    headers:{...SB_HDR,"Prefer":"resolution=merge-duplicates,return=representation"},
     body:JSON.stringify(data)
   });
+  if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbUpsert ${table} HTTP ${r.status}: ${err}`);}
+  return r;
 }
 async function sbInsert(table,data){
   const r=await fetch(`${SB_URL}/rest/v1/${table}`,{
@@ -279,7 +284,12 @@ async function sbUpdate(table,id,data){
 }
 
 async function sbGetProfile(){return sbGet("pacing_arc",{device_id:DEVICE_ID(),date:"profile"});}
-async function sbSaveProfile(p){await sbUpsert("pacing_arc",{device_id:DEVICE_ID(),date:"profile",checkin:p,updated_at:new Date().toISOString()});}
+async function sbSaveProfile(p){
+  // Always write to localStorage first — survives network failures and app reloads
+  localStorage.setItem("pac_profile",JSON.stringify(p));
+  // Then sync to Supabase
+  await sbUpsert("pacing_arc",{device_id:DEVICE_ID(),date:"profile",checkin:p,updated_at:new Date().toISOString()});
+}
 async function sbGetToday(){return sbGet("pacing_arc",{device_id:DEVICE_ID(),date:todayStr()});}
 async function sbSaveToday(data){await sbUpsert("pacing_arc",{device_id:DEVICE_ID(),date:todayStr(),...data,updated_at:new Date().toISOString()});}
 async function sbGetEvents(){return sbQuery("pacing_arc_events",{device_id:DEVICE_ID()},"date");}
@@ -369,6 +379,8 @@ async function init(){
     const row=await sbGetProfile();
     if(row&&row.checkin){
       PROFILE=row.checkin;
+      // Keep localStorage in sync so offline fallback is always current
+      localStorage.setItem("pac_profile",JSON.stringify(PROFILE));
       const today=await sbGetToday();
       if(today){
         S.gate=today.gate||"green";
@@ -396,8 +408,24 @@ async function init(){
       SYNC_STATUS="ok";
       S.screen="home";
     } else {
-      SYNC_STATUS="ok";
-      S.screen="setup";
+      // Supabase returned no profile row — check localStorage before showing setup
+      // This covers: first load after a fresh deploy, or Supabase row not yet created
+      const localProfile=JSON.parse(localStorage.getItem("pac_profile")||"null");
+      if(localProfile){
+        PROFILE=localProfile;
+        // Re-save to Supabase now that we have a working connection
+        sbSaveProfile(PROFILE).catch(()=>{});
+        await loadRecentDays();
+        if(!S.plan) S.memory_adjustment=calcMemoryAdjustment();
+        await loadEventsAndTemplates();
+        await loadMaintenanceLog();
+        await loadMealData();
+        SYNC_STATUS="ok";
+        S.screen="home";
+      } else {
+        SYNC_STATUS="ok";
+        S.screen="setup";
+      }
     }
   }catch{
     SYNC_STATUS="off";
