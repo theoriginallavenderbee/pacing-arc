@@ -89,7 +89,7 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// PACING ARC v8.2
+// PACING ARC v9.0
 // v4.1: Sleep score EU, weighted gate, orthostatic costs
 // v4.2: Weather, rest timer, overexertion, time-of-day
 // v4.3: Cycle calc, banking planner, events, forecast
@@ -105,6 +105,9 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 // v8.2: EU calibration fix, micro-actions survival tier, activity log,
 //        rest timer EU return, cross-device sync, context-aware home screen,
 //        negative EU tracking (always logs), discretionary EU display
+// v9.0: Retroactive task logging, evening close-out loop, "What now?" mode,
+//        post-event recovery tracking (24h prompt), start_time → Supabase,
+//        bb_high default corrected to 65
 // ═══════════════════════════════════════════════════
 
 const SB_URL = "https://wtdymvqlugmfwemqyvde.supabase.co";
@@ -304,20 +307,67 @@ const RESTORATIVE_PRACTICES = [
     note:"Safe on all gates. Minimal tier always available."
   },
   {
-    id:"nervous_system_reg",
-    name:"Nervous system regulation",
-    eu_cost:1,
+    id:"yoga_nidra",
+    name:"Yoga nidra",
+    eu_cost:0.5,
     return_profile:"same_day",
-    return_eu:1,
-    return_note:"~1 EU same-day · calms ANS",
+    return_eu:1.5,
+    return_note:"~1.5 EU same-day · deep nervous system rest",
     tiers:{
-      full:{label:"Full practice",eu:1},
-      reduced:{label:"Short practice (5 min)",eu:0.5},
-      minimal:{label:"Box breathing only",eu:0}
+      full:{label:"Guided session (30–45 min)",eu:0.5},
+      reduced:{label:"Short session (15 min)",eu:0.25},
+      minimal:{label:"Body scan only (10 min)",eu:0}
     },
     gate_min:"red",
     contraindicated:[],
-    note:"Safe on all gates."
+    note:"Safe on all gates including red — this is restorative rest, not effort."
+  },
+  {
+    id:"yoga_daily",
+    name:"Yoga — daily practice",
+    eu_cost:2,
+    return_profile:"multi_day",
+    return_eu:2,
+    return_note:"~2 EU return over next 2 days · supports sleep quality",
+    tiers:{
+      full:{label:"Full routine (15–30 min)",eu:2},
+      reduced:{label:"Gentle mobility only",eu:1},
+      minimal:{label:"Three poses lying down",eu:0.5}
+    },
+    gate_min:"yellow",
+    contraindicated:["red"],
+    note:"Full routine on green. Reduced tier safe on yellow. Avoid on red — use yoga nidra instead."
+  },
+  {
+    id:"sophrology_sleep",
+    name:"Sleep sophrology",
+    eu_cost:2,
+    return_profile:"multi_day",
+    return_eu:2.5,
+    return_note:"~2.5 EU return next day · targets overnight stress and sleep architecture",
+    tiers:{
+      full:{label:"Full session (20–25 min)",eu:2},
+      reduced:{label:"Short session (10 min)",eu:1}
+    },
+    gate_min:"yellow",
+    contraindicated:["red"],
+    note:"⚠ Do in the daytime — not at night. Evening timing reduces effectiveness. Safe on yellow at reduced tier."
+  },
+  {
+    id:"brain_based_wellness",
+    name:"Brain Based Wellness",
+    eu_cost:2,
+    return_profile:"multi_day",
+    return_eu:2,
+    return_note:"~2 EU return over 2–3 days · cumulative neurological benefit",
+    tiers:{
+      full:{label:"Full session (60–90 min)",eu:3},
+      reduced:{label:"Medium session (30 min)",eu:2},
+      minimal:{label:"Short session (10 min)",eu:1}
+    },
+    gate_min:"yellow",
+    contraindicated:["red"],
+    note:"Duration scales cost. Log which session number for continuity. Safe on yellow at shorter durations."
   }
 ];
 // Look up a practice by name (matches TASK_COSTS_BASE key too)
@@ -436,7 +486,6 @@ async function sbSaveToday(data){await sbUpsert("pacing_arc",{device_id:DEVICE_I
 async function sbGetEvents(){return sbQuery("pacing_arc_events",{device_id:DEVICE_ID()},"date");}
 async function sbGetTemplates(){return sbQuery("pacing_arc_templates",{device_id:DEVICE_ID()},"created_at");}
 
-async function loadEventsAndTemplates(){
 // ── MICRO-ACTIONS — SURVIVAL TIER (v8.2) ──────────
 // Always visible, always tappable, 0–0.5 EU, never trigger budget warning
 const MICRO_ACTIONS = [
@@ -451,9 +500,12 @@ const MICRO_ACTIONS = [
   {id:"brush_teeth",name:"Brush teeth",eu:0.5,icon:"🦷"},
   {id:"floss",name:"Floss",eu:0.5,icon:"🦷",note:"Can be done seated"},
 ];
+
+async function loadEventsAndTemplates(){
+  try{
+    const [evs,tpls]=await Promise.all([sbGetEvents(),sbGetTemplates()]);
     EVENTS=Array.isArray(evs)?evs:[];
     TEMPLATES=Array.isArray(tpls)?tpls:[];
-    console.log(`Loaded ${EVENTS.length} events, ${TEMPLATES.length} templates for ${DEVICE_ID()}`);
   }catch(e){
     console.warn("Failed to load events/templates:",e);
   }
@@ -532,6 +584,17 @@ let S={
   show_activity_log:false,       // collapsible activity log visible
   show_log_rest:false,           // manual rest log panel
   pending_rest_return:null,      // {eu, mins} — offered after rest timer completes
+  // v9.0 — evening close-out loop
+  show_closeout:false,
+  closeout_data:{},
+  // v9.0 — "what now?" mode
+  show_what_now:false,
+  // v9.0 — retroactive log sheet
+  show_retroactive_sheet:false,
+  retroactive_task:null,
+  show_log_past_sheet:false,
+  // v9.0 — recovery tracking
+  recovery_prompts_dismissed:{},
 };
 
 // ═══════════════════════════════════════════════════
@@ -1056,7 +1119,7 @@ function gateColour(ci){
   let s=0;
   const e=ci.energy??5, bb=ci.battery??50;
   const bbLow=Number((PROFILE&&PROFILE.bb_low)??5);
-  const bbHigh=Number((PROFILE&&PROFILE.bb_high)??15);
+  const bbHigh=Number((PROFILE&&PROFILE.bb_high)??65);
   const bbMid=Math.round((bbLow+bbHigh)/2);
 
   // Body Battery scoring
@@ -1097,7 +1160,7 @@ function euBudget(ci,bankingMod){
   const e=ci.energy??5;
   const bb=ci.battery??50;
   const bbLow=Number((PROFILE&&PROFILE.bb_low)??5);
-  const bbHigh=Number((PROFILE&&PROFILE.bb_high)??15);
+  const bbHigh=Number((PROFILE&&PROFILE.bb_high)??65);
   const bbMid=Math.round((bbLow+bbHigh)/2);
   const hrvOk=ci.hrv==="Balanced";
 
@@ -1626,8 +1689,95 @@ function getSuggestedMaintenance(remainingEU){
 }
 
 // ═══════════════════════════════════════════════════
-// RENDER ENGINE
+// v9.0 — "WHAT NOW?" SUGGESTION ENGINE
 // ═══════════════════════════════════════════════════
+function whatNowSuggestion(){
+  const gate=S.gate||"green";
+  const h=new Date().getHours();
+  const euRem=S.eu_budget-S.eu_used;
+  const euPctUsed=S.eu_budget>0?(S.eu_used/S.eu_budget):0;
+  const inDeficit=euRem<0;
+  const timerRunning=S.rest_timer!==null;
+
+  // Timer is already running
+  if(timerRunning) return {icon:"🛋",text:"You're already resting — that's exactly right. Stay with it."};
+
+  // In deficit: always rest
+  if(inDeficit) return {icon:"🔴",text:"You've gone past your budget. The kindest thing now is to lie down and do nothing."};
+
+  // Red gate: always rest
+  if(gate==="red") return {icon:"🛋",text:"Red gate — lie down now. Body wipe or drink water is always okay. Nothing else."};
+
+  const todayPlan=S.plan&&S.plan.tasks?S.plan.tasks:[];
+  const loggedTasks=(S.activity_log||[]).map(e=>e.task.split(" (")[0]);
+  const nextTask=todayPlan.find(([name])=>!loggedTasks.includes(name));
+
+  // Yellow gate — depends on time
+  if(gate==="yellow"){
+    if(h>=21) return {icon:"🌙",text:"Wind-down time. Close screens, dim lights, and move toward rest."};
+    if(h>=14&&euPctUsed>0.6) return {icon:"🛋",text:"More than half your budget is spent and the afternoon is here. A rest now protects tomorrow."};
+    if(nextTask) return {icon:"⚡",text:`Drink some water first, then: ${nextTask[0]} (${nextTask[1]} EU).`};
+    return {icon:"💧",text:"Drink some water. Your task list is clear — gentle rest is the best next move."};
+  }
+
+  // Green gate
+  if(h>=21) return {icon:"🌙",text:"Wind-down time — the day's work is done. Start settling."};
+  if(nextTask) return {icon:"✅",text:`Your next priority: ${nextTask[0]} (${nextTask[1]} EU). You have ${euRem > 0 ? euRem : 0} EU remaining.`};
+  return {icon:"🌿",text:`You've handled your priorities. ${euRem>3?"A restorative practice would use your remaining energy well.":"Rest and let the day settle."}`};
+}
+
+// ═══════════════════════════════════════════════════
+// v9.0 — EVENING CLOSE-OUT LOOP
+// ═══════════════════════════════════════════════════
+function generateCloseout(){
+  const euUsed=S.eu_used;
+  const euBudget=S.eu_budget;
+  const over=euUsed>euBudget;
+  const diff=Math.abs(euUsed-euBudget);
+
+  // Tomorrow's projected budget
+  const bankMod=getBankingModForDate(dateAddDays(todayStr(),1));
+  const tomorrowEu=Math.max(5,Math.round(forecastEuForDate(dateAddDays(todayStr(),1))*(over?0.85:1)));
+
+  // Gate accuracy
+  const gateHeld=S.ci.evening_feel!=="Much worse"&&S.ci.evening_feel!=="Worse";
+
+  // One thing to protect tonight
+  const now=new Date();
+  const winddown=calcBedtime();
+  const windMins=parseInt(winddown.winddownTime.split(":")[0])*60+parseInt(winddown.winddownTime.split(":")[1]);
+  const nowMins=now.getHours()*60+now.getMinutes();
+  const minsToWind=windMins-nowMins;
+
+  let protectNote="";
+  if(S.ci.sleep<60) protectNote="Your sleep score has been low — screens off 60 min before bed would help most.";
+  else if(minsToWind>0&&minsToWind<60) protectNote=`Wind-down starts in ${minsToWind} minutes — start settling now.`;
+  else if(S.ci.eaten_yet==="Not yet") protectNote="First meal within an hour of waking tomorrow — it helps your energy read more accurately.";
+  else protectNote=`Aim to be asleep by ${winddown.bedTime}. A calm wind-down from ${winddown.winddownTime} helps overnight stress.`;
+
+  return {euUsed,euBudget,over,diff,tomorrowEu,gateHeld,protectNote,bankMod};
+}
+
+// ═══════════════════════════════════════════════════
+// v9.0 — POST-EVENT RECOVERY TRACKING
+// ═══════════════════════════════════════════════════
+function getRecoveryPrompts(){
+  const today=todayStr();
+  const prompts=[];
+  for(const ev of EVENTS){
+    if(!ev.recovery_days||ev.recovery_days<1)continue;
+    if(S.recovery_prompts_dismissed[ev.id])continue;
+    if(ev.recovery_feedback)continue; // already answered
+    // Show 24–48 hours after event
+    const daysSince=daysBetween(ev.date,today);
+    if(daysSince>=1&&daysSince<=2){
+      prompts.push(ev);
+    }
+  }
+  return prompts;
+}
+
+
 // ═══════════════════════════════════════════════════
 // MEAL PLANNING DATA LAYER (v6.1)
 // ═══════════════════════════════════════════════════
@@ -1848,6 +1998,21 @@ function showToast(msg, color){
   setTimeout(()=>t.remove(),4000);
 }
 
+function commitRetroactiveLog(timeStr){
+  if(!S.retroactive_task)return;
+  const {task,cost}=S.retroactive_task;
+  S.eu_used+=cost;
+  if(!S.activity_log)S.activity_log=[];
+  const entry={task,cost,time:timeStr,retroactive:true};
+  S.activity_log.push(entry);
+  S.activity_log.sort((a,b)=>a.time.localeCompare(b.time));
+  S.show_retroactive_sheet=false;
+  S.retroactive_task=null;
+  startRestTimer();
+  render();syncToday();
+  showToast(`Logged: ${task} (${timeStr})`);
+}
+
 function render(){
   const app=document.getElementById("app");
   if(S.screen==="loading"){app.innerHTML=renderLoading();return;}
@@ -1856,6 +2021,7 @@ function render(){
   if(S.screen==="checkin"){app.innerHTML=renderCheckin();bindCheckin();return;}
   if(S.screen==="main"){app.innerHTML=renderMain();bindMain();return;}
   if(S.screen==="settings"){app.innerHTML=renderSettings();bindSettings();return;}
+  if(S.screen==="closeout"){app.innerHTML=renderCloseout();bindCloseout();return;}
 }
 
 // ── LOADING ───────────────────────────────────────
@@ -2122,6 +2288,8 @@ function renderMain(){
   if(S.show_panic)sheets.push(renderPanicSheet());
   if(S.show_wakeup_check)sheets.push(renderWakeupCheckSheet());
   if(S.show_log_rest)sheets.push(renderLogRestSheet());
+  if(S.show_retroactive_sheet)sheets.push(renderRetroactiveSheet()); // v9.0
+  if(S.show_log_past_sheet)sheets.push(renderLogPastSheet()); // v9.0
 
   return `<div style="display:flex;flex-direction:column;height:100vh">
     <div class="header">
@@ -2233,6 +2401,13 @@ function renderPlan(){
     ${isEvening&&!S.evening_done?`<button class="btn btn-secondary in" id="btn-evening" style="width:100%;margin-bottom:14px;border-color:rgba(129,140,248,.3)!important;color:var(--accent2)">🌙 Evening check-in</button>`:""}
     <button class="btn btn-secondary in" id="btn-voluntary" style="width:100%;margin-bottom:14px;border-color:rgba(148,163,184,.25)!important;color:var(--subtle);font-size:.82rem">↺ Energy shift check-in</button>
     ${isEvening&&S.evening_done?`<div style="font-size:.75rem;color:var(--muted);text-align:center;margin-bottom:12px">✓ Evening check-in complete</div>`:""}
+    ${renderWhatNowCard()}
+    <div style="margin-bottom:14px" class="in">
+      <button id="btn-what-now" style="display:flex;align-items:center;gap:8px;width:100%;padding:10px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;font-size:.82rem;color:var(--subtle);cursor:pointer;justify-content:center">
+        <span>🤔</span><span>What now?</span>
+      </button>
+    </div>
+    ${renderRecoveryPrompts()}
     ${renderBedtimeCard()}
     ${renderMaintenanceSuggestions()}
     ${shouldShowWakeupCheck()?`<div class="card in" style="margin-bottom:14px;background:rgba(129,140,248,.05);border-color:rgba(129,140,248,.2)">
@@ -2379,7 +2554,10 @@ function renderTasks(){
     ${cutoff?`<div style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:.78rem;color:var(--red)" class="in">🌙 MHMR cutoff — no more tasks after 21:30</div>`:""}
     ${euPct()>=100?`<div class="overexertion-banner" style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25)"><span>🔴</span><span style="font-size:.8rem;color:var(--red)">EU budget reached — rest now</span></div>`:""}
     <h3 style="margin-bottom:4px">Activity planner</h3>
-    <p style="color:var(--muted);font-size:.78rem;margin-bottom:8px">Tap to log. ${rem<0?`<strong style="color:var(--red)">${Math.abs(rem)} EU drawn from tomorrow</strong>`:`Remaining: <strong style="color:${euColor()}">${rem} EU</strong>`}${ortho?" · ⚠ Orthostatic adjustments active":""}</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <p style="color:var(--muted);font-size:.78rem;margin:0">Tap to log. ${rem<0?`<strong style="color:var(--red)">${Math.abs(rem)} EU drawn from tomorrow</strong>`:`Remaining: <strong style="color:${euColor()}">${rem} EU</strong>`}${ortho?" · ⚠ Orthostatic adjustments active":""}</p>
+      <button id="btn-log-past" style="background:none;border:none;color:var(--accent);font-size:.72rem;cursor:pointer;white-space:nowrap;padding:0 0 0 10px">⏱ Log past</button>
+    </div>
     ${S.ci&&S.ci.taha_hinengaro?`<div style="display:flex;gap:8px;margin-bottom:12px;font-size:.68rem;color:var(--muted);flex-wrap:wrap">
       <span>CU: <strong style="color:${(S.cu_budget-S.cu_used)<=1?"var(--red)":(S.cu_budget-S.cu_used)<=2?"var(--yellow)":"var(--green)"}">${Math.max(0,S.cu_budget-S.cu_used)} left</strong></span>
       <span style="color:var(--border)">·</span>
@@ -3772,6 +3950,139 @@ function renderPanicSheet(){
   </div>`;
 }
 
+// ── v9.0 EVENING CLOSE-OUT SCREEN ─────────────────
+function renderCloseout(){
+  const d=S.closeout_data||generateCloseout();
+  const {euUsed,euBudget,over,diff,tomorrowEu,gateHeld,protectNote,bankMod}=d;
+  const euLine=over
+    ? `You used ${euUsed} EU against a ${euBudget} EU budget — <strong style="color:var(--orange)">${diff} drawn from tomorrow</strong>.`
+    : `You used ${euUsed} of your ${euBudget} EU today. ${diff>0?`${diff} EU unused.`:"Right on budget."}`;
+  const gateNote=gateHeld
+    ? "Your gate estimate held well today."
+    : "The day ended harder than the morning suggested — that's useful to know.";
+  const tomorrowLine=bankMod<1
+    ? `Tomorrow's budget is shaped by banking — projected around <strong style="color:var(--yellow)">${tomorrowEu} EU</strong>.`
+    : `Tomorrow's projected budget: <strong style="color:var(--green)">${tomorrowEu} EU</strong>.`;
+
+  return `<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px;text-align:center" class="safe-t safe-b">
+    <div style="font-size:2.5rem;margin-bottom:20px">🌙</div>
+    <h1 style="font-size:1.6rem;margin-bottom:6px;font-family:var(--serif)">End of day</h1>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:28px">You showed up. That matters.</p>
+    <div style="width:100%;max-width:380px;text-align:left;display:flex;flex-direction:column;gap:12px">
+      <div class="card in">
+        <h3 style="margin-bottom:8px">Today</h3>
+        <p style="font-size:.82rem;color:var(--subtle);line-height:1.7">${euLine}</p>
+        <p style="font-size:.8rem;color:var(--muted);margin-top:4px">${gateNote}</p>
+      </div>
+      <div class="card in">
+        <h3 style="margin-bottom:8px">Tomorrow</h3>
+        <p style="font-size:.82rem;color:var(--subtle);line-height:1.7">${tomorrowLine}</p>
+      </div>
+      <div class="card in" style="border-color:rgba(129,140,248,.25);background:rgba(129,140,248,.05)">
+        <h3 style="margin-bottom:8px;color:var(--accent2)">Protect tonight</h3>
+        <p style="font-size:.82rem;color:var(--subtle);line-height:1.7">${protectNote}</p>
+      </div>
+      <button class="btn btn-secondary in" id="btn-closeout-done" style="width:100%;margin-top:4px">Done — good night 🌿</button>
+    </div>
+  </div>`;
+}
+
+// ── v9.0 "WHAT NOW?" CARD ─────────────────────────
+function renderWhatNowCard(){
+  if(!S.show_what_now)return"";
+  const s=whatNowSuggestion();
+  return `<div class="card in" style="margin-bottom:14px;background:rgba(56,189,248,.05);border-color:rgba(56,189,248,.2);border-radius:14px;padding:14px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div style="flex:1">
+        <div style="font-size:1.3rem;margin-bottom:6px">${s.icon}</div>
+        <div style="font-size:.88rem;color:var(--text);line-height:1.6">${s.text}</div>
+      </div>
+      <button id="btn-dismiss-what-now" style="background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;flex-shrink:0;padding:2px 4px">×</button>
+    </div>
+  </div>`;
+}
+
+// ── v9.0 RETROACTIVE TASK LOG SHEET ───────────────
+function renderRetroactiveSheet(){
+  if(!S.show_retroactive_sheet||!S.retroactive_task)return"";
+  const {task,cost}=S.retroactive_task;
+  const now=new Date();
+  // Use preset time from log-past sheet if available
+  const presetTime=S._retro_preset_time||null;
+  const hh=presetTime?presetTime.split(":")[0]:now.getHours().toString().padStart(2,"0");
+  const mm=presetTime?presetTime.split(":")[1]:now.getMinutes().toString().padStart(2,"0");
+  return `<div class="sheet-overlay" id="retroactive-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <h2 style="font-size:1rem">Log: ${escH(task)}</h2>
+        <button id="close-retroactive-sheet" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:.74rem;color:var(--muted);margin-bottom:18px;line-height:1.6">${cost} EU · Set the time this happened — defaults to now.</p>
+      <div class="field">
+        <label class="field-label">When did this happen?</label>
+        <input type="time" id="retroactive-time" class="text-in" style="width:160px" value="${hh}:${mm}"/>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="retro-log-now" class="btn btn-secondary" style="flex:1">Log at now</button>
+        <button id="retro-log-confirm" class="btn btn-primary" style="flex:1">Log at this time</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── v9.0 POST-EVENT RECOVERY PROMPT ───────────────
+function renderRecoveryPrompts(){
+  if(S.gate==="red")return""; // don't show when depleted
+  const prompts=getRecoveryPrompts();
+  if(!prompts.length)return"";
+  return prompts.map(ev=>`
+    <div class="card in" style="margin-bottom:12px;border-color:rgba(167,139,250,.25);background:rgba(167,139,250,.05)" id="recovery-prompt-${ev.id}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:.7rem;color:#a78bfa;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px">Recovery check</div>
+          <div style="font-size:.85rem;font-weight:500">You had <em>${escH(ev.title)}</em> on ${dayOfMonthShort(ev.date)}</div>
+          <div style="font-size:.75rem;color:var(--muted);margin-top:2px">How did the recovery land?</div>
+        </div>
+        <button class="recovery-dismiss" data-id="${ev.id}" style="background:none;border:none;color:var(--muted);font-size:1rem;cursor:pointer;padding:2px 4px">×</button>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${[["Better than expected","#34d399"],["About right","#fbbf24"],["Harder than expected","#f87171"]].map(([label,col])=>
+          `<button class="recovery-rating-btn" data-id="${ev.id}" data-rating="${label}" style="flex:1;min-width:80px;padding:7px 10px;border-radius:10px;font-size:.72rem;font-weight:500;background:${col}12;border:1px solid ${col}40!important;color:${col};cursor:pointer">${label}</button>`
+        ).join("")}
+      </div>
+    </div>`).join("");
+}
+
+// ── v9.0 LOG PAST TASK SHEET ──────────────────────
+function renderLogPastSheet(){
+  if(!S.show_log_past_sheet)return"";
+  const costs=getTaskCosts();
+  const taskNames=Object.keys(costs).sort();
+  return `<div class="sheet-overlay" id="log-past-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="font-size:1rem">Log a past task</h2>
+        <button id="close-log-past-sheet" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:.74rem;color:var(--muted);margin-bottom:14px;line-height:1.6">Choose the task and set the time it happened.</p>
+      <div class="field" style="margin-bottom:12px">
+        <label class="field-label">Task</label>
+        <select id="log-past-task-select" class="text-in" style="width:100%">
+          <option value="">— choose task —</option>
+          ${taskNames.map(n=>`<option value="${escH(n)}">${escH(n)} (${costs[n]} EU)</option>`).join("")}
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:16px">
+        <label class="field-label">When did this happen?</label>
+        <input type="time" id="log-past-time" class="text-in" style="width:160px" value="${(()=>{const n=new Date();return n.getHours().toString().padStart(2,"0")+":"+n.getMinutes().toString().padStart(2,"0");})()}"/>
+      </div>
+      <button id="log-past-confirm" class="btn btn-primary" style="width:100%">Log this task</button>
+    </div>
+  </div>`;
+}
+
 // ── SETTINGS ──────────────────────────────────────
 function renderSettings(){
   const p=PROFILE||{};
@@ -3807,9 +4118,9 @@ function renderSettings(){
         <div class="field" style="flex:1"><label class="field-label">Typical low</label>
           <input type="number" id="s-bb-low" class="text-in" style="width:100%" value="${p.bb_low??5}" placeholder="5"/></div>
         <div class="field" style="flex:1"><label class="field-label">Typical high</label>
-          <input type="number" id="s-bb-high" class="text-in" style="width:100%" value="${p.bb_high??15}" placeholder="15"/></div>
+          <input type="number" id="s-bb-high" class="text-in" style="width:100%" value="${p.bb_high??65}" placeholder="65"/></div>
       </div>
-      <p style="color:var(--border);font-size:.7rem;margin-bottom:16px">Midpoint = ${Math.round(((p.bb_low??5)+(p.bb_high??15))/2)} · BB below low → 2 pts · BB low–midpoint → 1 pt · BB above midpoint → 0 pts</p>
+      <p style="color:var(--border);font-size:.7rem;margin-bottom:16px">Midpoint = ${Math.round(((p.bb_low??5)+(p.bb_high??65))/2)} · BB below low → 2 pts · BB low–midpoint → 1 pt · BB above midpoint → 0 pts</p>
 
       <h3 style="margin-bottom:12px">Sleep & wind-down profile</h3>
       <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Used by the bedtime calculator on the Plan tab.</p>
@@ -3886,7 +4197,7 @@ function bindSettings(){
       cycle_length:document.getElementById("s-cycle").value||28,
       last_period_start:document.getElementById("s-period").value||"",
       bb_low:Number(document.getElementById("s-bb-low")?.value)||5,
-      bb_high:Number(document.getElementById("s-bb-high")?.value)||15,
+      bb_high:Number(document.getElementById("s-bb-high")?.value)||65,
       sleep_onset_mins:Number(document.getElementById("s-onset")?.value)||30,
       time_in_bed_hours:Number(document.getElementById("s-tib")?.value)||8.5,
       functional_buffer_mins:Number(document.getElementById("s-buffer-mins")?.value)||45,
@@ -4439,6 +4750,65 @@ function bindMain(){
   // Evening check-in
   document.getElementById("btn-evening")?.addEventListener("click",()=>{S.show_evening=true;S.evening_step=0;S.evening_data={};render();});
   document.getElementById("btn-voluntary")?.addEventListener("click",()=>{S.show_voluntary=true;S.voluntary_step=0;S.voluntary_data={battery:S.ci?.battery??50,energy:S.ci?.energy??5};render();});
+
+  // v9.0 — "What now?" button
+  document.getElementById("btn-what-now")?.addEventListener("click",()=>{S.show_what_now=true;render();});
+  document.getElementById("btn-dismiss-what-now")?.addEventListener("click",()=>{S.show_what_now=false;render();});
+
+  // v9.0 — recovery prompts
+  document.querySelectorAll(".recovery-rating-btn").forEach(b=>b.addEventListener("click",async()=>{
+    const id=b.dataset.id;
+    const rating=b.dataset.rating;
+    // Save feedback to the event record
+    const ev=EVENTS.find(e=>e.id===id);
+    if(ev){
+      ev.recovery_feedback=rating;
+      try{await sbUpdate("pacing_arc_events",id,{notes:(ev.notes?ev.notes+"\n":"")+"Recovery: "+rating});}catch{}
+    }
+    S.recovery_prompts_dismissed[id]=true;
+    render();
+    showToast("Recovery logged — thank you");
+  }));
+  document.querySelectorAll(".recovery-dismiss").forEach(b=>b.addEventListener("click",()=>{
+    S.recovery_prompts_dismissed[b.dataset.id]=true;render();
+  }));
+
+  // v9.0 — retroactive task log sheet
+  document.getElementById("close-retroactive-sheet")?.addEventListener("click",()=>{S.show_retroactive_sheet=false;S.retroactive_task=null;render();});
+  document.getElementById("retroactive-overlay")?.addEventListener("click",e=>{if(e.target.id==="retroactive-overlay"){S.show_retroactive_sheet=false;S.retroactive_task=null;render();}});
+  document.getElementById("retro-log-now")?.addEventListener("click",()=>{
+    if(!S.retroactive_task)return;
+    const now=new Date();
+    const t=now.getHours().toString().padStart(2,"0")+":"+now.getMinutes().toString().padStart(2,"0");
+    commitRetroactiveLog(t);
+  });
+  document.getElementById("retro-log-confirm")?.addEventListener("click",()=>{
+    if(!S.retroactive_task)return;
+    const t=document.getElementById("retroactive-time")?.value||"00:00";
+    commitRetroactiveLog(t);
+  });
+
+  // v9.0 — "Log past task" — opens proper sheet
+  document.getElementById("btn-log-past")?.addEventListener("click",()=>{
+    S.show_log_past_sheet=true;render();
+  });
+  // v9.0 — log past sheet
+  document.getElementById("close-log-past-sheet")?.addEventListener("click",()=>{S.show_log_past_sheet=false;render();});
+  document.getElementById("log-past-overlay")?.addEventListener("click",e=>{if(e.target.id==="log-past-overlay"){S.show_log_past_sheet=false;render();}});
+  document.getElementById("log-past-confirm")?.addEventListener("click",()=>{
+    const sel=document.getElementById("log-past-task-select");
+    const taskName=sel?.value;
+    if(!taskName)return;
+    const costs=getTaskCosts();
+    const cost=costs[taskName]??1;
+    const t=document.getElementById("log-past-time")?.value||"00:00";
+    S.show_log_past_sheet=false;
+    S.retroactive_task={task:taskName,cost};
+    S.show_retroactive_sheet=true;
+    // Pre-fill retroactive time with what was chosen
+    S._retro_preset_time=t;
+    render();
+  });
   document.getElementById("btn-first-meal")?.addEventListener("click",()=>{
     if(!S.ci)S.ci={};
     const now=new Date();
@@ -4499,9 +4869,9 @@ function bindEventSheet(){
     const start_time=document.getElementById("ev-time")?.value||null;
     const type=S.event_edit?.type||"medical";
     if(!title||!date){alert("Title and date are required.");return;}
-    // start_time kept in local object only — column not in Supabase schema
-    const data={device_id:DEVICE_ID(),date,title,type,eu_cost:eu,buffer_eu:buffer,recovery_days:recovery,notes};
-    const localData={...data,start_time}; // include start_time in local state only
+    // v9.0: start_time now saved to Supabase (requires ALTER TABLE pacing_arc_events ADD COLUMN start_time text)
+    const data={device_id:DEVICE_ID(),date,title,type,eu_cost:eu,buffer_eu:buffer,recovery_days:recovery,notes,start_time:start_time||null};
+    const localData={...data,start_time}; // keep local state consistent
     try{
       if(S.event_edit?.id){
         await sbUpdate("pacing_arc_events",S.event_edit.id,data);
@@ -4608,6 +4978,9 @@ function bindEveningSheet(){
     S.ci.cognitive_wall_hit=S.evening_data.cognitive_feel==="Hit a wall early";
     S.ci.notes_tomorrow=S.evening_data.notes_tomorrow||"";
     S.evening_done=true;S.show_evening=false;
+    // v9.0 — show evening close-out loop
+    S.closeout_data=generateCloseout();
+    S.screen="closeout";
     render();syncToday();
   });
 }
@@ -4668,6 +5041,15 @@ function bindVoluntarySheet(){
     S.show_voluntary=false;
     render();syncToday();
     showToast(`Gate updated: ${newGate} · ${S.eu_budget-S.eu_used} EU remaining`);
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// BIND CLOSEOUT SCREEN (v9.0)
+// ═══════════════════════════════════════════════════
+function bindCloseout(){
+  document.getElementById("btn-closeout-done")?.addEventListener("click",()=>{
+    S.screen="home";render();
   });
 }
 
@@ -4752,7 +5134,7 @@ function bindMiddaySheet(){
 // PWA
 // ═══════════════════════════════════════════════════
 if("serviceWorker" in navigator){
-  const sw=`const C="pacing-arc-v8.2";self.addEventListener("install",e=>{self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))));self.clients.claim();});self.addEventListener("fetch",e=>{if(e.request.url.includes("supabase.co")||e.request.url.includes("fonts.")||e.request.url.includes("open-meteo"))return;e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cl=res.clone();caches.open(C).then(c=>c.put(e.request,cl));return res;})));});`;
+  const sw=`const C="pacing-arc-v9.0";self.addEventListener("install",e=>{self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))));self.clients.claim();});self.addEventListener("fetch",e=>{if(e.request.url.includes("supabase.co")||e.request.url.includes("fonts.")||e.request.url.includes("open-meteo"))return;e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cl=res.clone();caches.open(C).then(c=>c.put(e.request,cl));return res;})));});`;
   navigator.serviceWorker.register(URL.createObjectURL(new Blob([sw],{type:"application/javascript"}))).catch(()=>{});
 }
 const mf={name:"Pacing Arc",short_name:"Pacing Arc",start_url:"./",display:"standalone",background_color:"#060910",theme_color:"#060910",icons:[{src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23060910'/%3E%3Ctext x='96' y='130' font-size='100' text-anchor='middle'%3E%F0%9F%8C%BF%3C/text%3E%3C/svg%3E",sizes:"192x192",type:"image/svg+xml"}]};
