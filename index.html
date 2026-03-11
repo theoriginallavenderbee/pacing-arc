@@ -902,7 +902,7 @@ function gateColour(ci){
   //         (PEM ≥2 still allows red regardless.)
   const bbStrong = bb >= bbHigh;
   const bbMidOk  = bb >= bbMid;
-  const hrvOk    = ci.hrv==="Balanced"||ci.hrv==="Good";
+  const hrvOk    = ci.hrv==="Balanced";
   const hasPEM   = pemCount >= 2;
 
   if(gate==="red" && !hasPEM){
@@ -919,7 +919,7 @@ function euBudget(ci,bankingMod){
   const bbLow=Number((PROFILE&&PROFILE.bb_low)??5);
   const bbHigh=Number((PROFILE&&PROFILE.bb_high)??15);
   const bbMid=Math.round((bbLow+bbHigh)/2);
-  const hrvOk=ci.hrv==="Balanced"||ci.hrv==="Good";
+  const hrvOk=ci.hrv==="Balanced";
 
   // Fix 1 — Objective floor: BB+HRV anchor the base tier.
   // If BB ≥ bb_mid AND HRV Balanced: energy ≤3 applies only −10% to typical base,
@@ -1211,7 +1211,7 @@ const CI_STEPS=[
   {id:"battery",q:"Body Battery?",hint:"Garmin Connect → Today",type:"slider",min:0,max:100,def:50,
     lbl:v=>v<25?"Depleted":v<50?"Low":v<75?"Moderate":"Good",col:v=>v<25?"#f87171":v<50?"#fb923c":v<75?"#fbbf24":"#34d399"},
   {id:"hrv",q:"HRV Status?",hint:"Garmin → Health Stats → HRV",type:"choice",
-    opts:["Poor","Unbalanced","Balanced","Good","Unknown"],cols:["#f87171","#fb923c","#34d399","#34d399","#64748b"]},
+    opts:["Poor","Unbalanced","Balanced","Unknown"],cols:["#f87171","#fb923c","#34d399","#64748b"]},
   {id:"rhr",q:"Resting HR this morning?",hint:"From your Garmin overnight reading",type:"number",unit:"bpm",ph:"e.g. 62"},
   {id:"sleep",q:"Sleep score?",hint:"Garmin sleep score or estimate 0–100",type:"slider",min:0,max:100,def:65,
     lbl:v=>v<40?"Poor":v<60?"Fair":v<80?"Good":"Excellent",col:v=>v<40?"#f87171":v<60?"#fb923c":v<80?"#fbbf24":"#34d399"},
