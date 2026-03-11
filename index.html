@@ -967,7 +967,9 @@ function euBudget(ci,bankingMod){
   // Environmental
   const env=ci.env||[];
   const baseBeforeEnv=base;
-  if(env.includes("Temp >26°C")||env.includes("UV >7")||env.includes("Sleep <6 hours"))base=Math.round(base*.75);
+  // "Sleep <6 hours" removed from env modifier — sleep score (0–100) ≠ sleep hours;
+  // a separate sleep_hours field is needed before this can fire reliably.
+  if(env.includes("Temp >26°C")||env.includes("UV >7"))base=Math.round(base*.75);
   if(base!==baseBeforeEnv)console.log("[PacingArc][euBudget] env triggered:",env,"after env mod:",base);
 
   // Banking modifier
@@ -1256,7 +1258,7 @@ const CI_STEPS=[
     opts:["Follicular","Ovulation","Luteal","Late luteal","Not tracking"],
     cols:["#34d399","#818cf8","#fb923c","#f87171","#64748b"]},
   {id:"env",q:"Environmental factors?",hint:"Temp, UV, sleep disruption — auto pre-filled from weather",type:"multi",
-    opts:["Temp >26°C","UV >7","Sleep <6 hours","None"]},
+    opts:["Temp >26°C","UV >7","None"]},
   {id:"plans",q:"Plans or concerns today?",hint:"Appointments, visitors, tasks",type:"text",ph:"Leave blank if none"}
 ];
 
