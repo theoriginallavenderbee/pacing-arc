@@ -107,29 +107,32 @@ const DEFAULT_EU = {high:18, typical:12, low:6};
 
 // Base task costs
 const TASK_COSTS_BASE = {
-  "Shower":3,"Getting dressed":1,"Breakfast prep":2,"Cooking":4,
+  "Shower":3,"Getting dressed":1,"Meal prep — light":1,"Meal prep — medium":2,"Meal prep — heavy":4,
   "Laundry":3,"Light computer work":2,"Reading / screens":1,
-  "Short walk outdoors":3,"Grocery shopping":6,"Phone call":2,
+  "Short walk outdoors":3,"Grocery shopping — order prep":3,"Grocery shopping — order submit":1,"Grocery shopping — click and collect":3,"Phone call":2,
   "Appointment (local)":5,"Appointment (travel)":8,
   "Bedding (lay out)":1,"Bedding (put away)":1,
   "Dishwashing block":1,"Habit logging":1,"Medication prep":3,
   "Nervous system regulation":1,"Short message":1
 };
-const STANDING_TASKS = ["Shower","Getting dressed","Breakfast prep","Cooking","Laundry","Short walk outdoors","Grocery shopping"];
+const STANDING_TASKS = ["Shower","Getting dressed","Meal prep — light","Meal prep — medium","Meal prep — heavy","Laundry","Short walk outdoors","Grocery shopping — click and collect"];
 
 // ── TASK TIERS (v6.4) ─────────────────────────────
 // Each tier: { label, eu }. Tasks with no tiers use TASK_COSTS_BASE as their only option.
 const TASK_TIERS_DEFAULT = {
   "Shower":             { full:{label:"Full shower",eu:3},           reduced:{label:"Hair wash only",eu:2},            minimal:{label:"Sponge wash / dry shampoo",eu:1} },
   "Getting dressed":    { full:{label:"Full outfit",eu:1},           reduced:{label:"Comfortable home clothes",eu:0} },
-  "Breakfast prep":     { full:{label:"Cook breakfast",eu:2},        reduced:{label:"Assembly — no cooking",eu:1},      minimal:{label:"No-prep eating",eu:0} },
-  "Cooking":            { full:{label:"Full cook",eu:4},             reduced:{label:"Rice cooker / Instant Pot",eu:2},  minimal:{label:"Reheat only",eu:1} },
+  "Meal prep — light":  { full:{label:"Reheat / kettle",eu:1},         reduced:{label:"No-prep eating",eu:0},              minimal:{label:"No-prep eating",eu:0} },
+  "Meal prep — medium": { full:{label:"Rice cooker / Instant Pot",eu:2}, reduced:{label:"Reheat only",eu:1},             minimal:{label:"No-prep eating",eu:0} },
+  "Meal prep — heavy":  { full:{label:"Multi-component cook",eu:4},      reduced:{label:"Rice cooker / Instant Pot",eu:2}, minimal:{label:"Reheat only",eu:1} },
   "Dishwashing block":  { full:{label:"Full wash-up",eu:1},          reduced:{label:"One item only",eu:0} },
   "Laundry":            { full:{label:"Wash + fold",eu:3},           reduced:{label:"Wash on, skip folding",eu:2},      minimal:{label:"Spot clean / refresh spray",eu:1} },
   "Short walk outdoors":{ full:{label:"Short walk",eu:3},            reduced:{label:"Walk to letterbox",eu:1},          minimal:{label:"Stand outside 5 min",eu:0} },
   "Medication prep":    { full:{label:"Full prep",eu:3},             reduced:{label:"Pre-sorted pills only",eu:1} },
   "Light computer work":{ full:{label:"Active work",eu:2},           reduced:{label:"Read only, no output",eu:1} },
-  "Grocery shopping":   { full:{label:"In-store shopping",eu:6},     reduced:{label:"Click and collect only",eu:3} },
+  "Grocery shopping — order prep":   { full:{label:"Plan & build order",eu:3},  reduced:{label:"Quick reorder",eu:1} },
+  "Grocery shopping — order submit": { full:{label:"Submit order",eu:1},         reduced:{label:"Submit order",eu:1} },
+  "Grocery shopping — click and collect": { full:{label:"Drive + collect",eu:3}, reduced:{label:"Drive + collect",eu:3} },
   "Phone call":         { full:{label:"Full call",eu:2},             reduced:{label:"Voice message only",eu:1} },
 };
 
@@ -189,8 +192,8 @@ const TASK_COGNITIVE_MODE = {
   "Nervous system regulation":"passive",
   "Shower":"execution",
   "Getting dressed":"execution",
-  "Breakfast prep":"execution",
-  "Cooking":"execution",
+  "Meal prep — light":"execution","Meal prep — medium":"execution","Meal prep — heavy":"execution",
+  "Grocery shopping — order prep":"structural","Grocery shopping — order submit":"execution","Grocery shopping — click and collect":"execution",
   "Laundry":"execution",
   "Short walk":"passive",
   "Click & collect":"execution",
@@ -278,11 +281,13 @@ async function sbDelete(table,id){
   await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`,{method:"DELETE",headers:SB_HDR});
 }
 async function sbUpdate(table,id,data){
-  await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`,{
+  const r=await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`,{
     method:"PATCH",
-    headers:SB_HDR,
+    headers:{...SB_HDR,"Prefer":"return=representation"},
     body:JSON.stringify(data)
   });
+  if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbUpdate ${table} HTTP ${r.status}: ${err}`);}
+  return r;
 }
 
 async function sbGetProfile(){return sbGet("pacing_arc",{device_id:DEVICE_ID(),date:"profile"});}
@@ -428,7 +433,7 @@ async function init(){
       const today=await sbGetToday();
       if(today){
         S.eu_used=today.eu_used||0;
-        S.plan=today.plan?JSON.parse(today.plan):null;
+        S.plan=today.plan?(typeof today.plan==="string"?JSON.parse(today.plan):today.plan):null;
         if(today.checkin)S.ci=today.checkin;
         if(today.midday_done)S.midday_done=true;
         if(today.in_crash!==undefined)S.in_crash=today.in_crash;
@@ -500,9 +505,12 @@ async function init(){
 
 async function syncToday(){
   try{
-    await sbSaveToday({gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,plan:S.plan?JSON.stringify(S.plan):null,checkin:S.ci,midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done});
+    await sbSaveToday({gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,plan:S.plan||null,checkin:S.ci||null,midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done});
     SYNC_STATUS="ok";
-  }catch{SYNC_STATUS="off";}
+  }catch(e){
+    SYNC_STATUS="off";
+    console.warn("[PacingArc] syncToday failed:",e.message);
+  }
   updateSyncDot();
 }
 function updateSyncDot(){
@@ -905,10 +913,17 @@ function gateColour(ci){
   if(ci.hrv==="Poor")s+=2; else if(ci.hrv==="Unbalanced")s+=1;
   // Energy
   if(e<4)s+=1;
-  // PEM symptoms (max 2 pts)
-  const pem=["Muscle pain","Sore throat/flu feeling","Wired-tired","Sensory sensitivity"];
-  const pemCount=(ci.symptoms||[]).filter(x=>pem.includes(x)).length;
-  s+=Math.min(2,pemCount);
+  // PEM symptoms — weighted spectrum (max 2 pts)
+  const syms=ci.symptoms||[];
+  let pemScore=0;
+  if(syms.includes("Muscle pain"))pemScore+=1;
+  if(syms.includes("Muscle tightness"))pemScore+=0.5;
+  if(syms.includes("Strongly wired-tired"))pemScore+=1;
+  if(syms.includes("Mild wired-tired"))pemScore+=0.5;
+  if(syms.includes("Sore throat/flu feeling"))pemScore+=1;
+  if(syms.includes("Sensory sensitivity"))pemScore+=0.5;
+  const pemCount=pemScore; // keep name for hasPEM check below
+  s+=Math.min(2,pemScore);
 
   let gate=s>=4?"red":s>=2?"yellow":"green";
 
@@ -916,14 +931,13 @@ function gateColour(ci){
   const bbStrong = bb >= bbHigh;
   const bbMidOk  = bb >= bbMid;
   const hrvOk    = ci.hrv==="Balanced";
-  const hasPEM   = pemCount >= 2;
+  const hasPEM   = pemScore >= 2;
 
   if(gate==="red" && !hasPEM){
     if(bbStrong && hrvOk) gate="yellow";
     else if(bbMidOk && hrvOk) gate="yellow";
   }
 
-  console.log("[PacingArc][gateColour] bb:",bb,"bbLow:",bbLow,"bbHigh:",bbHigh,"bbMid:",bbMid,"energy:",e,"hrv:",ci.hrv,"pemCount:",pemCount,"rawScore:",s,"gate:",gate,"bbStrong:",bbStrong,"bbMidOk:",bbMidOk,"hrvOk:",hrvOk);
   return gate;
 }
 
@@ -948,44 +962,33 @@ function euBudget(ci,bankingMod){
   } else {
     base = DEFAULT_EU.typical;
   }
-  console.log("[PacingArc][euBudget] START — bb:",bb,"bbLow:",bbLow,"bbHigh:",bbHigh,"bbMid:",bbMid,"energy:",e,"hrv:",ci.hrv,"objectiveOk:",objectiveOk,"base after energy tier:",base,"bankingMod:",bankingMod);
 
   // Sleep score modifier
   const sleep=ci.sleep??65;
-  const baseBeforeSleep=base;
   if(sleep<40)base=Math.round(base*.85);
   else if(sleep<60)base=Math.round(base*.95);
-  console.log("[PacingArc][euBudget] sleep:",sleep,"base before:",baseBeforeSleep,"after sleep mod:",base);
 
   // Phase
   const phase=ci.phase||"Not tracking";
-  const baseBeforePhase=base;
   if(phase==="Luteal")base=Math.round(base*.8);
   if(phase==="Late luteal")base=Math.round(base*.75);
-  console.log("[PacingArc][euBudget] phase:",phase,"base before:",baseBeforePhase,"after phase mod:",base);
 
   // Environmental
   const env=ci.env||[];
-  const baseBeforeEnv=base;
-  // "Sleep <6 hours" removed from env modifier — sleep score (0–100) ≠ sleep hours;
-  // a separate sleep_hours field is needed before this can fire reliably.
-  if(env.includes("Temp >26°C")||env.includes("UV >7"))base=Math.round(base*.75);
-  if(base!==baseBeforeEnv)console.log("[PacingArc][euBudget] env triggered:",env,"after env mod:",base);
+  // Environmental modifiers — temp/UV from weather auto-fill; sleep hours from check-in field
+  const sleepHours=ci.sleep_hours!==undefined&&ci.sleep_hours!==""?Number(ci.sleep_hours):null;
+  const sleepShort=sleepHours!==null&&sleepHours<6;
+  if(env.includes("Temp >26°C")||env.includes("UV >7")||sleepShort)base=Math.round(base*.75);
 
   // Banking modifier
-  const baseBeforeBanking=base;
   if(bankingMod!==undefined&&bankingMod<1)base=Math.round(base*bankingMod);
-  console.log("[PacingArc][euBudget] banking mod:",bankingMod,"base before:",baseBeforeBanking,"after banking:",base);
 
   // Gate multiplier
   const g=gateColour(ci);
-  const baseBeforeGate=base;
   if(g==="yellow")base=Math.round(base*.65);
   if(g==="red")base=Math.round(base*.4);
-  console.log("[PacingArc][euBudget] gate:",g,"base before gate mult:",baseBeforeGate,"after gate mult:",base);
 
   const result=Math.max(3,base);
-  console.log("[PacingArc][euBudget] FINAL (before memory adj):",result);
   return result;
 }
 
@@ -1002,7 +1005,7 @@ function driftCheck(ci){
   if((ci.battery??50)<40)s.push("Low Body Battery");
   if(ci.hrv==="Poor"||ci.hrv==="Unbalanced")s.push("HRV warning");
   if((ci.energy??5)<4)s.push("Low energy");
-  ["Muscle pain","Sore throat/flu feeling","Wired-tired","Sensory sensitivity"]
+  ["Muscle pain","Muscle tightness","Sore throat/flu feeling","Strongly wired-tired","Mild wired-tired","Sensory sensitivity"]
     .forEach(x=>{if((ci.symptoms||[]).includes(x))s.push(x);});
   return s;
 }
@@ -1018,8 +1021,9 @@ function generatePlan(ci){
   const e=ci.energy??5;
   const bb=ci.battery??50;
   const syms=ci.symptoms||[];
-  const pem=["Muscle pain","Sore throat/flu feeling","Wired-tired","Sensory sensitivity"];
-  const pemCount=syms.filter(x=>pem.includes(x)).length;
+  const pemHeavy=["Muscle pain","Sore throat/flu feeling","Strongly wired-tired"];
+  const pemLight=["Muscle tightness","Mild wired-tired","Sensory sensitivity"];
+  const pemCount=syms.filter(x=>pemHeavy.includes(x)).length + syms.filter(x=>pemLight.includes(x)).length*0.5;
 
   // Rest ratio
   let restRatio="10 min activity / 30 min rest";
@@ -1032,11 +1036,11 @@ function generatePlan(ci){
   const ortho=syms.includes("Dizziness/orthostatic");
   let priorityNames=[];
   if(gate==="red"){
-    priorityNames=["Medication prep","Breakfast prep","Getting dressed","Dishwashing block","Nervous system regulation"];
+    priorityNames=["Medication prep","Meal prep — light","Getting dressed","Dishwashing block","Nervous system regulation"];
   } else if(gate==="yellow"){
-    priorityNames=["Shower","Getting dressed","Breakfast prep","Medication prep","Dishwashing block","Habit logging","Reading / screens"];
+    priorityNames=["Shower","Getting dressed","Meal prep — light","Medication prep","Dishwashing block","Habit logging","Reading / screens"];
   } else {
-    priorityNames=["Shower","Getting dressed","Breakfast prep","Medication prep","Light computer work","Dishwashing block","Habit logging"];
+    priorityNames=["Shower","Getting dressed","Meal prep — light","Medication prep","Light computer work","Dishwashing block","Habit logging"];
   }
   let euLeft=eu;
   const fittingTasks=[];
@@ -1240,6 +1244,7 @@ const CI_STEPS=[
   {id:"rhr",q:"Resting HR this morning?",hint:"From your Garmin overnight reading",type:"number",unit:"bpm",ph:"e.g. 62"},
   {id:"sleep",q:"Sleep score?",hint:"Garmin sleep score or estimate 0–100",type:"slider",min:0,max:100,def:65,
     lbl:v=>v<40?"Poor":v<60?"Fair":v<80?"Good":"Excellent",col:v=>v<40?"#f87171":v<60?"#fb923c":v<80?"#fbbf24":"#34d399"},
+  {id:"sleep_hours",q:"Sleep duration?",hint:"Hours shown in Garmin Connect — enables <6h EU modifier",type:"number",unit:"hrs",ph:"e.g. 6.5"},
   {id:"energy",q:"Your energy right now?",hint:"0 = nothing, 10 = best in months",type:"slider",min:0,max:10,def:5,
     lbl:v=>v<3?"Very low":v<5?"Low":v<7?"Moderate":"Good",col:v=>v<3?"#f87171":v<5?"#fb923c":v<7?"#fbbf24":"#34d399"},
   // v6.0 — te whare tapa whā (non-physical walls)
@@ -1247,18 +1252,19 @@ const CI_STEPS=[
     opts:["Low","Okay","Good"],cols:["#f87171","#fb923c","#34d399"]},
   {id:"taha_wairua",q:"How connected do you feel to yourself?",hint:"Taha wairua — sense of self, groundedness. Trust your gut.",type:"choice",
     opts:["Low","Okay","Good"],cols:["#f87171","#fb923c","#34d399"]},
-  {id:"taha_whanau",q:"How do you feel about connection with others?",hint:"Taha whānau — relational. Includes chosen family, not just blood.",type:"choice",
+  {id:"taha_whanau",q:"How do you feel about the quality of your connection with others right now?",hint:"Taha whānau — relational. Includes chosen family, not just blood.",type:"choice",
     opts:["Low","Okay","Good"],cols:["#f87171","#fb923c","#34d399"]},
   {id:"feel",q:"How do you feel?",hint:"Gut check — set numbers aside",type:"choice",
     opts:["Crashed / unwell","Really tired","Tired but okay","Reasonable","Surprisingly okay"],
     cols:["#f87171","#fb923c","#fbbf24","#34d399","#34d399"]},
   {id:"symptoms",q:"Any symptoms today?",hint:"Select all that apply",type:"multi",
-    opts:["Brain fog","Muscle pain","Sore throat/flu feeling","Dizziness/orthostatic","Sensory sensitivity","Wired-tired","Headache","Nausea","None"]},
+    opts:["Brain fog","Muscle tightness","Muscle pain","Sore throat/flu feeling","Dizziness/orthostatic","Sensory sensitivity","Mild wired-tired","Strongly wired-tired","Headache","Nausea","None"]},
   {id:"phase",q:"Menstrual phase?",hint:"Pre-filled from cycle — edit if needed",type:"choice",
     opts:["Follicular","Ovulation","Luteal","Late luteal","Not tracking"],
     cols:["#34d399","#818cf8","#fb923c","#f87171","#64748b"]},
-  {id:"env",q:"Environmental factors?",hint:"Temp, UV, sleep disruption — auto pre-filled from weather",type:"multi",
-    opts:["Temp >26°C","UV >7","None"]},
+
+  {id:"night_waking",q:"Did you wake in the night?",hint:"Affects recovery quality — log for pattern tracking",type:"choice",
+    opts:["No","Yes — calm","Yes — unsettled"],cols:["#34d399","#fbbf24","#f87171"]},
   {id:"plans",q:"Plans or concerns today?",hint:"Appointments, visitors, tasks",type:"text",ph:"Leave blank if none"}
 ];
 
@@ -1869,7 +1875,11 @@ function bindCheckin(){
     }
     S.eu_used=0;
     S.drift_signals=driftCheck(S.ci);
-    S.in_crash=S.gate==="red"&&(S.ci.symptoms||[]).filter(s=>["Muscle pain","Sore throat/flu feeling","Wired-tired"].includes(s)).length>=2;
+    { const cs=S.ci.symptoms||[]; let cs_score=0;
+  if(cs.includes("Muscle pain"))cs_score+=1; if(cs.includes("Muscle tightness"))cs_score+=0.5;
+  if(cs.includes("Strongly wired-tired"))cs_score+=1; if(cs.includes("Mild wired-tired"))cs_score+=0.5;
+  if(cs.includes("Sore throat/flu feeling"))cs_score+=1;
+  S.in_crash=S.gate==="red"&&cs_score>=2; }
     S.plan=generatePlan(S.ci);
     // v6.0 cognitive layer
     S.cu_budget=calcCUBudget(S.ci.taha_hinengaro);
@@ -1922,7 +1932,7 @@ function renderMain(){
         <div style="font-size:.7rem;color:var(--muted)">${new Date().toLocaleDateString('en-NZ',{weekday:'short',day:'numeric',month:'short'})}</div></div>
       <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
         <span class="${gateClass(S.gate)}" style="font-size:.7rem">${gateEmoji(S.gate)} ${S.gate}</span>
-        <span style="font-size:.75rem;color:${euColor()};font-weight:500">${S.eu_budget-S.eu_used} EU</span>
+        <span style="font-size:.75rem;color:${euColor()};font-weight:500">${S.eu_used>S.eu_budget?`${S.eu_used-S.eu_budget} EU drawn from tomorrow`:`${S.eu_budget-S.eu_used} EU`}</span>
         <span class="sync-dot ${SYNC_STATUS==="ok"?"sync-ok":SYNC_STATUS==="off"?"sync-off":"sync-busy"}"></span>
       </div>
     </div>
@@ -1977,7 +1987,7 @@ function renderPlan(){
         <div style="height:100%;width:${pct}%;background:${euColor()};border-radius:4px;transition:width .4s"></div></div>
       <div style="display:flex;justify-content:space-between;margin-top:4px">
         <span style="font-size:.7rem;color:var(--muted)">Used: ${S.eu_used}</span>
-        <span style="font-size:.7rem;color:var(--muted)">Left: ${S.eu_budget-S.eu_used}</span>
+        <span style="font-size:.7rem;color:${S.eu_used>S.eu_budget?"var(--red)":"var(--muted)"}">${S.eu_used>S.eu_budget?`${S.eu_used-S.eu_budget} EU drawn from tomorrow`:`Left: ${S.eu_budget-S.eu_used}`}</span>
       </div>
     </div>
     ${WEATHER?weatherStripHtml():""}
@@ -2103,7 +2113,7 @@ function renderTasks(){
     ${cutoff?`<div style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:.78rem;color:var(--red)" class="in">🌙 MHMR cutoff — no more tasks after 21:30</div>`:""}
     ${euPct()>=100?`<div class="overexertion-banner" style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25)"><span>🔴</span><span style="font-size:.8rem;color:var(--red)">EU budget reached — rest now</span></div>`:""}
     <h3 style="margin-bottom:4px">Activity planner</h3>
-    <p style="color:var(--muted);font-size:.78rem;margin-bottom:8px">Tap to log. Remaining: <strong style="color:${euColor()}">${rem} EU</strong>${ortho?" · ⚠ Orthostatic adjustments active":""}</p>
+    <p style="color:var(--muted);font-size:.78rem;margin-bottom:8px">Tap to log. ${rem<0?`<strong style="color:var(--red)">${Math.abs(rem)} EU drawn from tomorrow</strong>`:`Remaining: <strong style="color:${euColor()}">${rem} EU</strong>`}${ortho?" · ⚠ Orthostatic adjustments active":""}</p>
     ${S.ci&&S.ci.taha_hinengaro?`<div style="display:flex;gap:8px;margin-bottom:12px;font-size:.68rem;color:var(--muted);flex-wrap:wrap">
       <span>CU: <strong style="color:${(S.cu_budget-S.cu_used)<=1?"var(--red)":(S.cu_budget-S.cu_used)<=2?"var(--yellow)":"var(--green)"}">${Math.max(0,S.cu_budget-S.cu_used)} left</strong></span>
       <span style="color:var(--border)">·</span>
@@ -3752,7 +3762,10 @@ function bindEventSheet(){
         if(saved&&saved.id)EVENTS.push(saved);
         else EVENTS.push({...data,id:"tmp_"+Date.now()});
       }
-    }catch{EVENTS.push({...data,id:"tmp_"+Date.now()});}
+    }catch(err){
+      EVENTS.push({...data,id:"tmp_"+Date.now()});
+      showToast("Save failed — event stored locally only: "+err.message);
+    }
     S.show_event_sheet=false;S.event_edit=null;render();
   });
 }
