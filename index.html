@@ -2036,7 +2036,7 @@ function renderPlan(){
     ${renderForecastStrip()}
     ${isMiddayWindow()?`<button class="btn btn-secondary in" id="btn-midday" style="width:100%;margin-bottom:14px">🕐 Mid-day check-in</button>`:""}
     ${isEvening&&!S.evening_done?`<button class="btn btn-secondary in" id="btn-evening" style="width:100%;margin-bottom:14px;border-color:rgba(129,140,248,.3)!important;color:var(--accent2)">🌙 Evening check-in</button>`:""}
-    ${S.ci&&S.ci.battery!==undefined?`<button class="btn btn-secondary in" id="btn-voluntary" style="width:100%;margin-bottom:14px;border-color:rgba(148,163,184,.25)!important;color:var(--subtle);font-size:.82rem">↺ Energy shift check-in</button>`:""}
+    <button class="btn btn-secondary in" id="btn-voluntary" style="width:100%;margin-bottom:14px;border-color:rgba(148,163,184,.25)!important;color:var(--subtle);font-size:.82rem">↺ Energy shift check-in</button>
     ${isEvening&&S.evening_done?`<div style="font-size:.75rem;color:var(--muted);text-align:center;margin-bottom:12px">✓ Evening check-in complete</div>`:""}
     ${renderBedtimeCard()}
     ${renderMaintenanceSuggestions()}
