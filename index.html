@@ -4344,9 +4344,9 @@ function renderIngredientSheet(){
   const cats   = ["protein","grain","vegetable","fruit","nut","seed","condiment","herb","dairy","frozen","canned","sauce","sweet","other"];
   const forms  = ["fresh","frozen","dried","canned","cooked","shelf-stable"];
   const locs   = getPantryLocations();
+  // Pre-populate expiry type from saved ingredient when editing
+  if(isEdit&&ing.expiry_type&&!S.ing_expiry_type_set)S.ing_expiry_type=ing.expiry_type;
   const exType = S.ing_expiry_type||"best_before";
-
-  // Auto-lookup from current name
   const fr  = lookupFructan(ing.name||"");
   const la  = lookupLactose(ing.name||"");
   const om  = lookupOmega(ing.name||"");
@@ -5804,10 +5804,11 @@ function bindMain(){
       INGREDIENT_INVENTORY.push(ing);
     }
     await saveMealData();
-    S.show_add_ingredient=false; S.ingredient_edit=null; S.ing_expiry_type="best_before"; render();
+    S.show_add_ingredient=false; S.ingredient_edit=null; S.ing_expiry_type="best_before"; S.ing_expiry_type_set=false; render();
   });
   document.querySelectorAll(".ing-edit").forEach(b=>b.addEventListener("click",()=>{
     S.ingredient_edit=INGREDIENT_INVENTORY.find(i=>i.id===b.dataset.id)||{};
+    S.ing_expiry_type=null; S.ing_expiry_type_set=false; // will be set from ingredient.expiry_type on render
     S.show_add_ingredient=true;render();
   }));
   document.querySelectorAll(".ing-delete").forEach(b=>b.addEventListener("click",async()=>{
@@ -5906,13 +5907,15 @@ function bindMain(){
   // Live search as user types
   document.getElementById("quick-add-input")?.addEventListener("input",e=>{
     const val=e.target.value?.trim()||"";
+    const caretPos=e.target.selectionStart;
     S.quick_add_search=val;
     S.quick_add_matches=val.length>=2?searchInventory(val):[];
     S.quick_add_update_mode=null;
     render();
-    // Restore cursor position
-    const inp=document.getElementById("quick-add-input");
-    if(inp){const len=val.length;inp.setSelectionRange(len,len);}
+    requestAnimationFrame(()=>{
+      const inp=document.getElementById("quick-add-input");
+      if(inp){inp.focus();try{inp.setSelectionRange(caretPos,caretPos);}catch(x){}}
+    });
   });
   document.getElementById("quick-add-input")?.addEventListener("keydown",e=>{
     if(e.key==="Enter"){e.preventDefault();document.getElementById("quick-add-btn")?.click();}
@@ -6022,6 +6025,7 @@ function bindMain(){
   // ── v9.3 — Expiry type buttons ────────────────
   document.querySelectorAll(".expiry-type-btn").forEach(b => b.addEventListener("click", () => {
     S.ing_expiry_type = b.dataset.t;
+    S.ing_expiry_type_set = true;
     render();
     setTimeout(()=>document.getElementById("ing-origin-date")?.focus(), 50);
   }));
