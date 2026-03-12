@@ -5993,10 +5993,12 @@ function bindMain(){
   // ── v9.3 — Audit search ───────────────────────
   document.getElementById("audit-search-input")?.addEventListener("input", e => {
     S.audit_search = e.target.value||"";
+    const caretPos = e.target.selectionStart;
     render();
-    // Restore focus + caret position
-    const el = document.getElementById("audit-search-input");
-    if(el){ const len = (S.audit_search||"").length; try{el.setSelectionRange(len,len);}catch(x){} }
+    requestAnimationFrame(()=>{
+      const el = document.getElementById("audit-search-input");
+      if(el){ el.focus(); try{el.setSelectionRange(caretPos,caretPos);}catch(x){} }
+    });
   });
   document.getElementById("audit-search-clear")?.addEventListener("click", () => {
     S.audit_search=""; render();
