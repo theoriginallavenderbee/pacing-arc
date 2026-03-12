@@ -89,7 +89,7 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// PACING ARC v9.1
+// PACING ARC v9.2
 // v4.1: Sleep score EU, weighted gate, orthostatic costs
 // v4.2: Weather, rest timer, overexertion, time-of-day
 // v4.3: Cycle calc, banking planner, events, forecast
@@ -108,6 +108,9 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 // v9.0: Retroactive task logging, evening close-out loop, "What now?" mode,
 //        post-event recovery tracking (24h prompt), start_time → Supabase,
 //        bb_high default corrected to 65
+// v9.1: cross-device sync fix, sleep hours+minutes, time-aware check-in label, pantry seeded
+// v9.2: pantry UX overhaul — location audit view, configurable locations,
+//        search-first quick-add with variant matching, meal planning urgency-first view
 // ═══════════════════════════════════════════════════
 
 const SB_URL = "https://wtdymvqlugmfwemqyvde.supabase.co";
@@ -127,6 +130,53 @@ const TASK_COSTS_BASE = {
   "Dishwashing block":1,"Habit logging":1,"Medication prep":3,
   "Nervous system regulation":1,"Short message":1
 };
+// ── PANTRY LOCATIONS (v9.2) ───────────────────────
+const PANTRY_DEFAULT_LOCATIONS = [
+  "Garage freezer",
+  "Garage fridge",
+  "Kitchen fridge",
+  "Kitchen bench",
+  "Kitchen pantry",
+  "Hallway pantry"
+];
+// Get configured locations from profile, fallback to defaults
+function getPantryLocations(){
+  return (PROFILE&&PROFILE.pantry_locations&&PROFILE.pantry_locations.length>0)
+    ? PROFILE.pantry_locations
+    : PANTRY_DEFAULT_LOCATIONS;
+}
+// Fuzzy match for variant search — returns score 0–1
+function fuzzyIngredientMatch(query, name){
+  if(!query||!name)return 0;
+  const q=query.toLowerCase().trim();
+  const n=name.toLowerCase().trim();
+  if(n===q)return 1;
+  if(n.includes(q)||q.includes(n))return 0.85;
+  // word overlap
+  const qw=q.split(/\s+/);
+  const nw=n.split(/\s+/);
+  const shared=qw.filter(w=>nw.some(nww=>nww.includes(w)||w.includes(nww))).length;
+  if(shared>0)return shared/Math.max(qw.length,nw.length)*0.7;
+  return 0;
+}
+// Return inventory items that fuzzy-match query
+function searchInventory(query){
+  if(!query||query.trim().length<2)return[];
+  return INGREDIENT_INVENTORY
+    .map(i=>({item:i,score:fuzzyIngredientMatch(query,i.name)}))
+    .filter(x=>x.score>0.3)
+    .sort((a,b)=>b.score-a.score)
+    .slice(0,5)
+    .map(x=>x.item);
+}
+// Urgency tier helper
+function getUrgencyTier(item){
+  const days=item.days_to_expiry;
+  if(item.urgency==="urgent"||(days!=null&&days<=2))return"urgent";
+  if(item.urgency==="soon"||(days!=null&&days<=5))return"soon";
+  return"normal";
+}
+
 const STANDING_TASKS = ["Shower","Getting dressed","Meal prep — light","Meal prep — medium","Meal prep — heavy","Laundry","Short walk outdoors","Grocery shopping — click and collect"];
 
 // ── TASK TIERS (v6.4) ─────────────────────────────
@@ -573,6 +623,16 @@ let S={
   // v7.0 — quick-add
   show_quick_add:false,          // quick-add pantry panel visible
   quick_add_list:[],             // [{id, name, category, form, quantity, location, expiry_date, days_to_expiry, urgency, high_fructan, omega_ratio, _incomplete}]
+  // v9.2 — audit session
+  audit_session_active:false,
+  audit_session_confirmed:{},    // {ingredient_id: true}
+  audit_session_start:null,
+  audit_expanded_locations:{},   // {locationName: true}
+  // v9.2 — quick-add search
+  quick_add_search:"",
+  quick_add_matches:[],          // existing inventory items matching search
+  quick_add_update_mode:null,    // id of item being updated instead of added
+  quick_add_last_location:null,  // last location used in session
   // v6.3 — wake-up check
   show_wakeup_check:false,
   wakeup_check_dismissed:false,
@@ -3196,13 +3256,12 @@ function renderMaintenance(){
 // ═══════════════════════════════════════════════════
 function renderMeals(){
   const tab = S.meal_tab || "overview";
-  const urgent = getUrgentIngredients();
-  const urgentComp = getUrgentComponents();
   const hasData = hasPantryData();
+  const locations = getPantryLocations();
 
   const subTabs = [
-    {id:"overview", label:"Overview"},
-    {id:"inventory", label:"Pantry"},
+    {id:"overview", label:"Use soon"},
+    {id:"audit", label:"Audit"},
     {id:"components", label:"Ready-made"},
     {id:"prompt", label:"Get plan"}
   ];
@@ -3213,100 +3272,162 @@ function renderMeals(){
 
   let body = "";
 
+  // ── OVERVIEW: urgency-first meal planning view ────
   if(tab === "overview"){
-    body = `
-      ${!hasData ? `<div class="card in" style="margin-bottom:16px;text-align:center;padding:24px">
+    if(!hasData){
+      body = `<div class="card in" style="margin-bottom:16px;text-align:center;padding:24px">
         <div style="font-size:1.8rem;margin-bottom:10px">🍱</div>
         <h2 style="font-size:1rem;margin-bottom:8px">Meal planning</h2>
         <p style="font-size:.8rem;color:var(--muted);margin-bottom:16px;line-height:1.6">Add your pantry ingredients and ready-made components, then generate a Claude meal plan prompt tailored to your energy today.</p>
         <div style="display:flex;flex-direction:column;gap:8px">
-          <button class="btn btn-primary meal-tab-btn" data-meal-tab="inventory">🛒 Start pantry audit</button>
+          <button class="btn btn-primary meal-tab-btn" data-meal-tab="audit">🛒 Start pantry audit</button>
           <p style="font-size:.72rem;color:var(--muted)">Takes about 10 min · 2 EU · execution mode</p>
         </div>
-      </div>` : ""}
-
-      ${hasData && (urgent.length || urgentComp.length) ? `<div class="card in" style="margin-bottom:14px;background:rgba(248,113,113,.06);border-color:rgba(248,113,113,.2)">
-        <h3 style="margin-bottom:10px;color:var(--red)">⚠ Use soon</h3>
-        ${urgent.map(i=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:.8rem">
-          <span>${i.name} <span style="font-size:.7rem;color:var(--muted)">${i.form}</span></span>
-          <span style="color:var(--red)">${i.days_to_expiry != null ? i.days_to_expiry+"d" : "urgent"}</span>
-        </div>`).join("")}
-        ${urgentComp.map(c=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:.8rem">
-          <span>${c.name} <span style="font-size:.7rem;color:var(--muted)">${c.servings_remaining} servings</span></span>
-          <span style="color:var(--orange)">${c.days_to_expiry != null ? c.days_to_expiry+"d" : "urgent"}</span>
-        </div>`).join("")}
-      </div>` : ""}
-
-      ${hasData ? `<div class="card in" style="margin-bottom:14px">
-        <h3 style="margin-bottom:10px">Pantry summary</h3>
-        <div style="display:flex;gap:10px;margin-bottom:12px">
-          <div style="flex:1;background:var(--bg3);border-radius:10px;padding:10px;text-align:center">
-            <div style="font-size:1.4rem;font-weight:500;color:var(--accent)">${INGREDIENT_INVENTORY.length}</div>
-            <div style="font-size:.65rem;color:var(--muted)">ingredients</div>
-          </div>
-          <div style="flex:1;background:var(--bg3);border-radius:10px;padding:10px;text-align:center">
-            <div style="font-size:1.4rem;font-weight:500;color:var(--green)">${READY_COMPONENTS.length}</div>
-            <div style="font-size:.65rem;color:var(--muted)">components</div>
-          </div>
-          <div style="flex:1;background:var(--bg3);border-radius:10px;padding:10px;text-align:center">
-            <div style="font-size:1.4rem;font-weight:500;color:var(--red)">${urgent.length + urgentComp.length}</div>
-            <div style="font-size:.65rem;color:var(--muted)">urgent</div>
-          </div>
-        </div>
-        <button class="btn btn-primary meal-tab-btn" data-meal-tab="prompt" style="width:100%">🌿 Generate meal plan prompt</button>
-      </div>` : ""}
-
-      <div class="card in" style="margin-bottom:14px;background:rgba(56,189,248,.04)">
-        <h3 style="margin-bottom:8px">How this works</h3>
-        <div style="font-size:.78rem;color:var(--subtle);line-height:1.7">
-          1. Add your pantry ingredients and ready-made components.<br>
-          2. Tap <em>Get plan</em> — the app assembles a detailed prompt tailored to your energy today.<br>
-          3. Paste it into Claude.ai and get your meal plan.<br>
-          4. Update your inventory as you cook and eat.
-        </div>
       </div>`;
-  }
+    } else {
+      // Build urgency-sorted list: components + ingredients, urgent → soon → normal
+      const allItems = [
+        ...READY_COMPONENTS.map(c=>({...c, _type:"component", _tier:getUrgencyTier(c)})),
+        ...INGREDIENT_INVENTORY.map(i=>({...i, _type:"ingredient", _tier:getUrgencyTier(i)}))
+      ];
+      const urgent = allItems.filter(x=>x._tier==="urgent");
+      const soon   = allItems.filter(x=>x._tier==="soon");
+      const normal = allItems.filter(x=>x._tier==="normal");
 
-  if(tab === "inventory"){
-    const byCategory = {};
-    INGREDIENT_INVENTORY.forEach(i => {
-      if(!byCategory[i.category]) byCategory[i.category] = [];
-      byCategory[i.category].push(i);
-    });
-    const cats = Object.keys(byCategory).sort();
-
-    body = `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <div style="font-size:.8rem;color:var(--muted)">${INGREDIENT_INVENTORY.length} ingredient${INGREDIENT_INVENTORY.length!==1?"s":""}</div>
-        <div style="display:flex;gap:8px">
-          <button id="btn-quick-add" class="btn btn-secondary" style="padding:7px 12px;font-size:.78rem">⚡ Quick-add</button>
-          <button id="btn-add-ingredient" class="btn btn-primary" style="padding:7px 14px;font-size:.78rem">+ Add ingredient</button>
-        </div>
-      </div>
-      ${INGREDIENT_INVENTORY.length === 0 ? `<div class="card" style="text-align:center;padding:20px;color:var(--muted);font-size:.8rem">
-        No ingredients yet. Tap <strong>+ Add ingredient</strong> to start your pantry audit.
-      </div>` : cats.map(cat => `
-        <div style="margin-bottom:16px">
-          <h3 style="margin-bottom:8px">${cat}</h3>
-          ${byCategory[cat].map(i => `<div class="card-sm in" style="margin-bottom:6px">
+      const renderMealItem = (item) => {
+        const isComp = item._type==="component";
+        const urgCol = item._tier==="urgent"?"var(--red)":item._tier==="soon"?"var(--orange)":"var(--muted)";
+        const urgLabel = item._tier==="urgent"
+          ? `<span style="font-size:.6rem;color:var(--red);background:rgba(248,113,113,.12);padding:1px 5px;border-radius:4px">urgent</span>`
+          : item._tier==="soon"
+          ? `<span style="font-size:.6rem;color:var(--orange);background:rgba(251,146,60,.12);padding:1px 5px;border-radius:4px">use soon</span>`
+          : "";
+        if(isComp){
+          return `<div class="card-sm in" style="margin-bottom:6px;background:rgba(167,139,250,.05);border-color:rgba(167,139,250,.2)">
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <div style="flex:1">
-                <div style="font-size:.82rem;font-weight:500">${i.name}
-                  ${i.high_fructan ? `<span style="font-size:.6rem;color:var(--red);margin-left:4px;background:rgba(248,113,113,.12);padding:1px 5px;border-radius:4px">fructan</span>` : ""}
-                  ${i.omega_ratio === "high" ? `<span style="font-size:.6rem;color:var(--green);margin-left:4px;background:rgba(52,211,153,.1);padding:1px 5px;border-radius:4px">ω3</span>` : ""}
+                <div style="font-size:.82rem;font-weight:500">${escH(item.name)} ${urgLabel}
+                  <span style="font-size:.6rem;color:#a78bfa;background:rgba(167,139,250,.1);padding:1px 5px;border-radius:4px;margin-left:2px">ready to use</span>
                 </div>
-                <div style="font-size:.72rem;color:var(--muted);margin-top:2px">${i.form} · ${i.quantity} · ${i.location}${i.days_to_expiry!=null?` · <span style="color:${i.days_to_expiry<=2?"var(--red)":"var(--muted)"}">${i.days_to_expiry}d</span>`:""}</div>
+                <div style="font-size:.72rem;color:var(--muted);margin-top:2px">${item.servings_remaining} servings · ${item.eu_to_use} EU to assemble${item.days_to_expiry!=null?` · <span style="color:${urgCol}">${item.days_to_expiry}d</span>`:""}</div>
               </div>
-              <div style="display:flex;gap:6px">
-                <button class="btn-ghost ing-edit" data-id="${i.id}" style="font-size:.8rem;padding:4px 8px;color:var(--muted)">✏</button>
-                <button class="btn-ghost ing-delete" data-id="${i.id}" style="font-size:.8rem;padding:4px 8px;color:var(--muted)">×</button>
+              <button class="btn-ghost comp-use" data-id="${item.id}" style="font-size:.75rem;padding:4px 8px;color:var(--green)" title="Use one serving">−1</button>
+            </div>
+          </div>`;
+        } else {
+          return `<div class="card-sm in" style="margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+              <div style="flex:1">
+                <div style="font-size:.82rem;font-weight:500">${escH(item.name)} ${urgLabel}</div>
+                <div style="font-size:.72rem;color:var(--muted);margin-top:2px">${item.quantity||""} · ${item.location||""}${item.days_to_expiry!=null?` · <span style="color:${urgCol}">${item.days_to_expiry}d</span>`:""}</div>
               </div>
             </div>
-          </div>`).join("")}
+          </div>`;
+        }
+      };
+
+      const sections = [];
+      if(urgent.length) sections.push(`<div style="margin-bottom:14px"><h3 style="color:var(--red);margin-bottom:8px">⚠ Use now (${urgent.length})</h3>${urgent.map(renderMealItem).join("")}</div>`);
+      if(soon.length)   sections.push(`<div style="margin-bottom:14px"><h3 style="color:var(--orange);margin-bottom:8px">⏳ Use soon (${soon.length})</h3>${soon.map(renderMealItem).join("")}</div>`);
+      if(normal.length) sections.push(`<div style="margin-bottom:14px"><h3 style="color:var(--muted);margin-bottom:8px">✓ In stock (${normal.length})</h3>${normal.map(renderMealItem).join("")}</div>`);
+
+      body = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <p style="font-size:.78rem;color:var(--muted);margin:0">${INGREDIENT_INVENTORY.length} ingredients · ${READY_COMPONENTS.length} ready-made</p>
+          <button class="btn btn-primary meal-tab-btn" data-meal-tab="prompt" style="padding:6px 12px;font-size:.76rem">🌿 Get meal plan</button>
         </div>
-      `).join("")}`;
+        ${sections.length ? sections.join("") : `<div class="card" style="text-align:center;padding:20px;color:var(--muted);font-size:.8rem">Everything looks fine — nothing urgent right now.</div>`}`;
+    }
   }
 
+  // ── AUDIT: location-based spatial view ───────────
+  if(tab === "audit"){
+    const sessionActive = S.audit_session_active;
+    const confirmed = S.audit_session_confirmed||{};
+    const confirmedCount = Object.keys(confirmed).length;
+
+    // Urgency badge helper
+    const urgBadge = (item) => {
+      const t = getUrgencyTier(item);
+      if(t==="urgent") return `<span style="font-size:.6rem;color:var(--red);background:rgba(248,113,113,.12);padding:1px 5px;border-radius:4px">urgent</span>`;
+      if(t==="soon")   return `<span style="font-size:.6rem;color:var(--orange);background:rgba(251,146,60,.12);padding:1px 5px;border-radius:4px">soon</span>`;
+      return "";
+    };
+
+    const locationSections = locations.map(loc => {
+      const items = INGREDIENT_INVENTORY
+        .filter(i => (i.location||"") === loc)
+        .sort((a,b) => {
+          const ta=getUrgencyTier(a), tb=getUrgencyTier(b);
+          const ord={urgent:0,soon:1,normal:2};
+          return (ord[ta]||2)-(ord[tb]||2);
+        });
+      const isExpanded = S.audit_expanded_locations[loc] !== false; // default open
+      const urgentCount = items.filter(i=>getUrgencyTier(i)==="urgent").length;
+      const soonCount   = items.filter(i=>getUrgencyTier(i)==="soon").length;
+
+      return `<div class="card in" style="margin-bottom:10px;padding:0;overflow:hidden">
+        <div class="audit-loc-header" data-loc="${escH(loc)}" style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;cursor:pointer;background:${isExpanded?"var(--bg2)":"var(--bg3)"}">
+          <div>
+            <span style="font-size:.88rem;font-weight:500">${escH(loc)}</span>
+            <span style="font-size:.72rem;color:var(--muted);margin-left:8px">${items.length} item${items.length!==1?"s":""}</span>
+            ${urgentCount?`<span style="font-size:.65rem;color:var(--red);margin-left:6px">● ${urgentCount} urgent</span>`:""}
+            ${soonCount&&!urgentCount?`<span style="font-size:.65rem;color:var(--orange);margin-left:6px">● ${soonCount} soon</span>`:""}
+          </div>
+          <span style="font-size:.8rem;color:var(--muted)">${isExpanded?"↑":"↓"}</span>
+        </div>
+        ${isExpanded ? `<div style="padding:0 14px 12px">
+          ${items.length===0
+            ? `<div style="padding:10px 0;font-size:.78rem;color:var(--muted);text-align:center">Nothing stored here</div>`
+            : items.map(item => {
+                const isConfirmed = !!confirmed[item.id];
+                return `<div class="audit-item" data-id="${item.id}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);gap:8px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:.82rem;font-weight:500;${isConfirmed?"opacity:.55;text-decoration:line-through":""}">${escH(item.name)} ${urgBadge(item)}</div>
+                    <div style="font-size:.7rem;color:var(--muted);margin-top:1px">${item.quantity||""}${item.days_to_expiry!=null?` · <span style="color:${getUrgencyTier(item)==="urgent"?"var(--red)":getUrgencyTier(item)==="soon"?"var(--orange)":"var(--muted)"}">${item.days_to_expiry}d</span>`:""}</div>
+                  </div>
+                  <div style="display:flex;gap:4px;flex-shrink:0">
+                    ${sessionActive
+                      ? `<button class="audit-confirm" data-id="${item.id}" style="background:${isConfirmed?"rgba(52,211,153,.2)":"var(--bg3)"};border:1px solid ${isConfirmed?"rgba(52,211,153,.4)":"var(--border)"}!important;color:${isConfirmed?"var(--green)":"var(--muted)"};font-size:.72rem;padding:4px 8px;border-radius:7px;cursor:pointer">${isConfirmed?"✓ here":"confirm"}</button>`
+                      : ""}
+                    <button class="btn-ghost ing-edit" data-id="${item.id}" style="font-size:.8rem;padding:4px 7px;color:var(--muted)" title="Edit">✏</button>
+                    <button class="btn-ghost ing-delete" data-id="${item.id}" style="font-size:.8rem;padding:4px 7px;color:var(--muted)" title="Delete">×</button>
+                  </div>
+                </div>`;
+              }).join("")
+          }
+        </div>` : ""}
+      </div>`;
+    });
+
+    // Items with unknown/missing location
+    const unknownItems = INGREDIENT_INVENTORY.filter(i=>!i.location||!locations.includes(i.location));
+    const unknownSection = unknownItems.length ? `<div class="card in" style="margin-bottom:10px;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.03)">
+      <div style="padding:10px 14px;font-size:.8rem;font-weight:500;color:var(--yellow)">⚠ Location unknown (${unknownItems.length})</div>
+      <div style="padding:0 14px 12px">${unknownItems.map(item=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.8rem">
+        <span>${escH(item.name)}</span>
+        <button class="btn-ghost ing-edit" data-id="${item.id}" style="font-size:.8rem;padding:3px 7px;color:var(--accent)">assign location</button>
+      </div>`).join("")}</div>
+    </div>` : "";
+
+    // Session controls
+    const sessionControls = sessionActive
+      ? `<div style="display:flex;gap:8px;margin-bottom:14px">
+          <div style="flex:1;background:rgba(52,211,153,.07);border:1px solid rgba(52,211,153,.25);border-radius:10px;padding:8px 12px;font-size:.78rem;color:var(--green)">
+            ✓ Audit in progress — ${confirmedCount} confirmed
+          </div>
+          <button id="btn-finish-audit" class="btn btn-secondary" style="font-size:.76rem;padding:7px 12px;white-space:nowrap">Finish audit</button>
+        </div>`
+      : `<div style="display:flex;gap:8px;margin-bottom:14px">
+          <button id="btn-start-audit" class="btn btn-secondary" style="flex:1;font-size:.78rem">Start audit session</button>
+          <button id="btn-quick-add" class="btn btn-primary" style="flex:1;font-size:.78rem">⚡ Quick-add</button>
+          <button id="btn-add-ingredient" class="btn btn-secondary" style="flex:0;padding:7px 12px;font-size:.78rem">+</button>
+        </div>`;
+
+    body = sessionControls + locationSections.join("") + unknownSection;
+  }
+
+  // ── COMPONENTS: ready-made items ─────────────────
   if(tab === "components"){
     const byType = {};
     READY_COMPONENTS.forEach(c => {
@@ -3328,7 +3449,7 @@ function renderMeals(){
           ${byType[type].map(c => `<div class="card-sm in" style="margin-bottom:6px">
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <div style="flex:1">
-                <div style="font-size:.82rem;font-weight:500">${c.name}
+                <div style="font-size:.82rem;font-weight:500">${escH(c.name)}
                   ${c.urgency==="urgent" ? `<span style="font-size:.6rem;color:var(--red);margin-left:4px;background:rgba(248,113,113,.12);padding:1px 5px;border-radius:4px">urgent</span>` : ""}
                 </div>
                 <div style="font-size:.72rem;color:var(--muted);margin-top:2px">${c.servings_remaining} servings · ${c.eu_to_use} EU to assemble${c.days_to_expiry!=null?` · <span style="color:${c.days_to_expiry<=2?"var(--red)":"var(--muted)"}">${c.days_to_expiry}d</span>`:""}</div>
@@ -3344,6 +3465,7 @@ function renderMeals(){
       `).join("")}`;
   }
 
+  // ── PROMPT: generate meal plan ────────────────────
   if(tab === "prompt"){
     const prompt = S.meal_prompt || generateMealPrompt();
     if(!S.meal_prompt) S.meal_prompt = prompt;
@@ -3362,7 +3484,7 @@ function renderMeals(){
       <div class="card in" style="background:rgba(56,189,248,.04)">
         <h3 style="margin-bottom:8px">After getting your plan</h3>
         <div style="font-size:.78rem;color:var(--subtle);line-height:1.7">
-          Update your pantry and components as you cook — that way your next prompt will be accurate. The app tracks what's urgent so you never lose track of things going off.
+          Update your pantry and components as you cook — that way your next prompt will be accurate. The app tracks what is urgent so you never lose track of things going off.
         </div>
       </div>`;
   }
@@ -3378,12 +3500,13 @@ function renderMeals(){
   </div>`;
 }
 
+
 function renderIngredientSheet(){
   const ing = S.ingredient_edit || {};
   const isEdit = !!ing.id;
   const cats = ["protein","grain","vegetable","sauce","dairy","condiment","sweet","other"];
   const forms = ["fresh","frozen","dried","canned","cooked","shelf-stable"];
-  const locs = ["fridge","freezer","pantry","counter"];
+  const locs = getPantryLocations();
   const omegas = ["high","balanced","low","unknown"];
 
   return `<div class="sheet-overlay" id="ing-sheet-overlay">
@@ -3523,8 +3646,51 @@ function parseQuickAddInput(raw){
   };
 }
 
+// ── v9.2 SEARCH-FIRST QUICK-ADD ───────────────────
 function renderQuickAddPanel(){
   const list = S.quick_add_list||[];
+  const searchVal = S.quick_add_search||"";
+  const matches = S.quick_add_matches||[];
+  const updateMode = S.quick_add_update_mode; // id of item being updated
+  const locs = getPantryLocations();
+  const lastLoc = S.quick_add_last_location||locs[0]||"";
+
+  const matchesHtml = matches.length && searchVal.trim().length>=2
+    ? `<div style="margin-bottom:10px;background:rgba(56,189,248,.05);border:1px solid rgba(56,189,248,.18);border-radius:10px;overflow:hidden">
+        <div style="padding:6px 12px;font-size:.7rem;color:var(--accent);border-bottom:1px solid rgba(56,189,248,.12)">Similar items already in pantry — update instead?</div>
+        ${matches.map(m=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)">
+          <div>
+            <div style="font-size:.8rem;font-weight:500">${escH(m.name)}</div>
+            <div style="font-size:.68rem;color:var(--muted)">${m.quantity||""} · ${m.location||""}</div>
+          </div>
+          <button class="qa-update-btn btn btn-secondary" data-id="${m.id}" style="font-size:.7rem;padding:5px 10px">Update this</button>
+        </div>`).join("")}
+        <div style="padding:6px 12px;font-size:.68rem;color:var(--muted)">or scroll down to add as new item</div>
+      </div>`
+    : "";
+
+  // Update mode: inline edit of existing item
+  const updateItem = updateMode ? INGREDIENT_INVENTORY.find(i=>i.id===updateMode) : null;
+  const updateForm = updateItem
+    ? `<div class="card in" style="margin-bottom:12px;border-color:rgba(56,189,248,.3);background:rgba(56,189,248,.04)">
+        <div style="font-size:.78rem;font-weight:500;margin-bottom:8px;color:var(--accent)">Updating: ${escH(updateItem.name)}</div>
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <div style="flex:1;min-width:100px">
+            <label style="font-size:.68rem;color:var(--muted);display:block;margin-bottom:3px">Quantity</label>
+            <input type="text" id="qa-upd-qty" class="text-in" style="width:100%;font-size:.8rem" value="${escH(updateItem.quantity||"")}" placeholder="e.g. 2 bags"/>
+          </div>
+          <div style="flex:1;min-width:100px">
+            <label style="font-size:.68rem;color:var(--muted);display:block;margin-bottom:3px">Days until expiry</label>
+            <input type="number" id="qa-upd-expiry" class="text-in" style="width:100%;font-size:.8rem" value="${updateItem.days_to_expiry??""}" placeholder="leave blank"/>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button id="qa-upd-save" class="btn btn-primary" data-id="${updateItem.id}" style="flex:1;font-size:.8rem">Save update</button>
+          <button id="qa-upd-cancel" class="btn btn-secondary" style="font-size:.8rem;padding:8px 14px">Cancel</button>
+        </div>
+      </div>`
+    : "";
+
   return `<div class="sheet-overlay" id="quickadd-overlay">
     <div class="sheet" style="max-height:90vh;overflow-y:auto">
       <div class="sheet-handle"></div>
@@ -3532,37 +3698,52 @@ function renderQuickAddPanel(){
         <h2 style="font-size:1rem">Quick-add ingredients</h2>
         <button id="close-quickadd" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
       </div>
-      <p style="font-size:.76rem;color:var(--muted);margin-bottom:10px;line-height:1.5">One ingredient per line. Minimum: name only. Add more detail to fill fields automatically.</p>
-      <div style="display:flex;gap:8px;margin-bottom:14px">
-        <input type="text" id="quick-add-input" class="text-in" style="flex:1;font-size:.82rem" placeholder="e.g. silken tofu, fridge, 4 days"/>
-        <button id="quick-add-btn" class="btn btn-primary" style="padding:10px 16px;white-space:nowrap">+ Add</button>
+      <p style="font-size:.74rem;color:var(--muted);margin-bottom:10px;line-height:1.5">Type a name — the app checks for similar items already in your pantry before adding.</p>
+
+      <div style="display:flex;gap:8px;margin-bottom:6px">
+        <input type="text" id="quick-add-input" class="text-in" style="flex:1;font-size:.82rem" placeholder="e.g. frozen berries, silken tofu" value="${escH(searchVal)}"/>
+        <button id="quick-add-btn" class="btn btn-primary" style="padding:10px 16px;white-space:nowrap">Add new</button>
       </div>
-      ${list.length===0?`<div style="text-align:center;padding:20px;font-size:.78rem;color:var(--muted)">Items you add will appear here. Tap any item to fill in missing details.</div>`:`
-        <div style="margin-bottom:14px">
+
+      ${matchesHtml}
+      ${updateForm}
+
+      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+        <div style="flex:1;min-width:140px">
+          <label style="font-size:.68rem;color:var(--muted);display:block;margin-bottom:3px">Location (default for this session)</label>
+          <select id="qa-default-loc" class="text-in" style="width:100%;font-size:.8rem">
+            ${locs.map(l=>`<option value="${escH(l)}" ${l===lastLoc?"selected":""}>${escH(l)}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+
+      ${list.length===0
+        ? `<div style="text-align:center;padding:16px;font-size:.78rem;color:var(--muted)">Items added will appear here.</div>`
+        : `<div style="margin-bottom:14px">
           ${list.map((ing,idx)=>{
             const incomplete = ing._missing && ing._missing.length>0;
             return `<div class="card-sm in quickadd-item" data-idx="${idx}" style="margin-bottom:6px;cursor:pointer;${incomplete?"border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.04)":"border-color:rgba(52,211,153,.25);background:rgba(52,211,153,.04)"}">
               <div style="display:flex;align-items:flex-start;justify-content:space-between">
                 <div style="flex:1">
                   <div style="font-size:.82rem;font-weight:500">${escH(ing.name)}
-                    ${incomplete?`<span style="font-size:.65rem;color:rgba(251,191,36,.8);margin-left:6px">tap to fill</span>`:`<span style="font-size:.65rem;color:var(--green);margin-left:6px">✓ complete</span>`}
+                    ${incomplete?`<span style="font-size:.65rem;color:rgba(251,191,36,.8);margin-left:6px">tap to fill</span>`:`<span style="font-size:.65rem;color:var(--green);margin-left:6px">✓</span>`}
                   </div>
                   <div style="font-size:.7rem;color:var(--muted);margin-top:2px">
                     ${[ing.quantity,ing.location,ing.days_to_expiry!=null?ing.days_to_expiry+"d":null].filter(Boolean).join(" · ")||"name only"}
-                    ${incomplete?`<span style="color:rgba(251,191,36,.7)"> · missing: ${ing._missing.join(", ")}</span>`:""}
                   </div>
                 </div>
                 <button class="quickadd-remove btn-ghost" data-idx="${idx}" style="padding:2px 6px;font-size:.9rem;color:var(--muted);flex-shrink:0">×</button>
               </div>
             </div>`;
           }).join("")}
-        </div>
-        <button id="quickadd-save-all" class="btn btn-primary" style="width:100%;margin-bottom:8px">Save ${list.length} ingredient${list.length!==1?"s":""} to pantry</button>
-        <p style="font-size:.68rem;color:var(--muted);text-align:center">Incomplete entries are saved — you can fill in missing details later.</p>
-      `}
+          <button id="quickadd-save-all" class="btn btn-primary" style="width:100%;margin-top:4px">Save ${list.length} ingredient${list.length!==1?"s":""} to pantry</button>
+        </div>`
+      }
     </div>
   </div>`;
 }
+
+
 function renderWakeupCheckSheet(){
   const bb = S.ci?.battery ?? 10;
   const energy = S.ci?.energy ?? 5;
@@ -4173,7 +4354,20 @@ function renderSettings(){
         <input type="date" id="s-period" class="text-in" style="width:180px" value="${p.last_period_start||''}"/></div>
       <p style="color:var(--muted);font-size:.72rem;margin-bottom:20px">Leave blank to disable phase tracking.</p>
 
-      <button class="btn btn-primary" id="s-save" style="width:100%">Save & sync profile</button>
+
+      <h3 style="margin-bottom:12px;margin-top:20px">Pantry locations</h3>
+      <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Your storage locations — shown in this order during pantry audit. Rename or reorder freely.</p>
+      <div id="pantry-loc-list" style="margin-bottom:10px">
+        ${((PROFILE&&PROFILE.pantry_locations)||PANTRY_DEFAULT_LOCATIONS).map((loc,i)=>`
+          <div class="pantry-loc-row" data-idx="${i}" style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="cursor:grab;color:var(--muted);font-size:.9rem;padding:4px">⠿</span>
+            <input type="text" class="text-in pantry-loc-input" style="flex:1;font-size:.8rem" value="${escH(loc)}" data-orig="${escH(loc)}"/>
+            <button class="pantry-loc-delete" data-idx="${i}" style="background:none;border:none;color:var(--red);font-size:1rem;cursor:pointer;padding:4px 6px">×</button>
+          </div>`).join("")}
+      </div>
+      <button id="btn-add-pantry-loc" class="btn btn-secondary" style="width:100%;margin-bottom:20px;font-size:.8rem">+ Add location</button>
+
+            <button class="btn btn-primary" id="s-save" style="width:100%">Save & sync profile</button>
 
       <h3 style="margin-bottom:12px;margin-top:24px">Notifications</h3>
       ${notifOn?`<div style="font-size:.78rem;color:var(--green);margin-bottom:12px">✓ Notifications enabled</div>
@@ -4231,6 +4425,9 @@ function bindSettings(){
       time_in_bed_hours:Number(document.getElementById("s-tib")?.value)||8.5,
       functional_buffer_mins:Number(document.getElementById("s-buffer-mins")?.value)||45,
       winddown_mins:Number(document.getElementById("s-winddown")?.value)||75,
+      // v9.2 — pantry locations
+      pantry_locations: Array.from(document.querySelectorAll(".pantry-loc-input"))
+        .map(inp=>inp.value.trim()).filter(Boolean),
     };
     try{
       await sbSaveProfile(PROFILE);
@@ -4277,6 +4474,28 @@ function bindSettings(){
   document.getElementById("s-reset")?.addEventListener("click",()=>{
     if(confirm("Reset all local data?")){localStorage.clear();PROFILE=null;S.screen="setup";S.setup_step=0;S.setup_data={};render();}
   });
+
+  // v9.2 — Add pantry location
+  document.getElementById("btn-add-pantry-loc")?.addEventListener("click",()=>{
+    const list=document.getElementById("pantry-loc-list");
+    if(!list)return;
+    const idx=list.querySelectorAll(".pantry-loc-row").length;
+    const div=document.createElement("div");
+    div.className="pantry-loc-row";
+    div.dataset.idx=idx;
+    div.style.cssText="display:flex;align-items:center;gap:6px;margin-bottom:6px";
+    div.innerHTML=`<span style="cursor:grab;color:var(--muted);font-size:.9rem;padding:4px">⠿</span>
+      <input type="text" class="text-in pantry-loc-input" style="flex:1;font-size:.8rem" placeholder="New location name"/>
+      <button class="pantry-loc-delete" data-idx="${idx}" style="background:none;border:none;color:var(--red);font-size:1rem;cursor:pointer;padding:4px 6px">×</button>`;
+    list.appendChild(div);
+    div.querySelector("input")?.focus();
+    // Bind delete on this new row
+    div.querySelector(".pantry-loc-delete")?.addEventListener("click",()=>div.remove());
+  });
+  // Delete existing location rows
+  document.querySelectorAll(".pantry-loc-delete").forEach(b=>b.addEventListener("click",()=>{
+    b.closest(".pantry-loc-row")?.remove();
+  }));
 }
 
 // ═══════════════════════════════════════════════════
@@ -4357,12 +4576,12 @@ function bindMain(){
   });
 
   // Pantry audit prompt buttons (Plan tab)
-  document.getElementById("btn-go-pantry")?.addEventListener("click",()=>{S.tab="meals";S.meal_tab="inventory";render();});
+  document.getElementById("btn-go-pantry")?.addEventListener("click",()=>{S.tab="meals";S.meal_tab="audit";render();});
   document.getElementById("btn-dismiss-pantry")?.addEventListener("click",()=>{S.pantry_audit_dismissed=true;render();});
 
   // Meals tab sub-nav and actions
   document.querySelectorAll(".meal-tab-btn").forEach(b=>b.addEventListener("click",()=>{S.meal_tab=b.dataset.mealTab;S.meal_prompt=null;render();}));
-  document.getElementById("btn-quick-add")?.addEventListener("click",()=>{S.show_quick_add=true;S.quick_add_list=[];render();});
+  document.getElementById("btn-quick-add")?.addEventListener("click",()=>{S.show_quick_add=true;S.quick_add_list=[];S.quick_add_search="";S.quick_add_matches=[];S.quick_add_update_mode=null;render();});
   document.getElementById("btn-add-ingredient")?.addEventListener("click",()=>{S.ingredient_edit={};S.show_add_ingredient=true;render();});
   document.getElementById("btn-add-component")?.addEventListener("click",()=>{S.component_edit={};S.show_add_component=true;render();});
 
@@ -4380,7 +4599,7 @@ function bindMain(){
       category: document.getElementById("ing-cat")?.value||"other",
       form: document.getElementById("ing-form")?.value||"fresh",
       quantity: document.getElementById("ing-qty")?.value||"",
-      location: document.getElementById("ing-loc")?.value||"fridge",
+      location: document.getElementById("ing-loc")?.value||(getPantryLocations()[0]||""),
       expiry_date,
       days_to_expiry: expiry_date ? daysFromExpiryDate(expiry_date) : null,
       urgency: (expiry_date && daysFromExpiryDate(expiry_date)<=3)?"urgent":"normal",
@@ -4485,27 +4704,76 @@ function bindMain(){
     await saveMealData();render();
   });
 
-  // Quick-add panel (v7.0)
-  document.getElementById("close-quickadd")?.addEventListener("click",()=>{S.show_quick_add=false;S.quick_add_list=[];render();});
-  document.getElementById("quickadd-overlay")?.addEventListener("click",e=>{if(e.target.id==="quickadd-overlay"){S.show_quick_add=false;S.quick_add_list=[];render();}});
-  document.getElementById("quick-add-btn")?.addEventListener("click",()=>{
-    const inp=document.getElementById("quick-add-input");
-    const val=inp?.value?.trim();
-    if(!val)return;
-    const parsed=parseQuickAddInput(val);
-    S.quick_add_list=[...S.quick_add_list,parsed];
-    inp.value="";
+  // Quick-add panel (v9.2 — search-first)
+  document.getElementById("close-quickadd")?.addEventListener("click",()=>{
+    S.show_quick_add=false;S.quick_add_list=[];S.quick_add_search="";S.quick_add_matches=[];S.quick_add_update_mode=null;render();
+  });
+  document.getElementById("quickadd-overlay")?.addEventListener("click",e=>{
+    if(e.target.id==="quickadd-overlay"){S.show_quick_add=false;S.quick_add_list=[];S.quick_add_search="";S.quick_add_matches=[];S.quick_add_update_mode=null;render();}
+  });
+  // Live search as user types
+  document.getElementById("quick-add-input")?.addEventListener("input",e=>{
+    const val=e.target.value?.trim()||"";
+    S.quick_add_search=val;
+    S.quick_add_matches=val.length>=2?searchInventory(val):[];
+    S.quick_add_update_mode=null;
     render();
+    // Restore cursor position
+    const inp=document.getElementById("quick-add-input");
+    if(inp){const len=val.length;inp.setSelectionRange(len,len);}
   });
   document.getElementById("quick-add-input")?.addEventListener("keydown",e=>{
     if(e.key==="Enter"){e.preventDefault();document.getElementById("quick-add-btn")?.click();}
   });
+  // "Add new" button — adds search value as new item
+  document.getElementById("quick-add-btn")?.addEventListener("click",()=>{
+    const inp=document.getElementById("quick-add-input");
+    const val=inp?.value?.trim();
+    if(!val)return;
+    const defaultLoc=document.getElementById("qa-default-loc")?.value||getPantryLocations()[0]||"";
+    S.quick_add_last_location=defaultLoc;
+    const parsed=parseQuickAddInput(val);
+    // Apply session default location if not parsed
+    if(!parsed.location)parsed.location=defaultLoc;
+    S.quick_add_list=[...S.quick_add_list,parsed];
+    S.quick_add_search="";S.quick_add_matches=[];S.quick_add_update_mode=null;
+    inp.value="";
+    render();
+    document.getElementById("quick-add-input")?.focus();
+  });
+  // "Update this" buttons — inline update mode
+  document.querySelectorAll(".qa-update-btn").forEach(btn=>btn.addEventListener("click",()=>{
+    S.quick_add_update_mode=btn.dataset.id;
+    S.quick_add_matches=[];
+    render();
+  }));
+  // Update form save
+  document.getElementById("qa-upd-save")?.addEventListener("click",async()=>{
+    const id=document.getElementById("qa-upd-save")?.dataset.id;
+    const qty=document.getElementById("qa-upd-qty")?.value?.trim()||"";
+    const expiryDays=document.getElementById("qa-upd-expiry")?.value;
+    const item=INGREDIENT_INVENTORY.find(i=>i.id===id);
+    if(item){
+      if(qty)item.quantity=qty;
+      if(expiryDays!==undefined&&expiryDays!==""){
+        item.expiry_date=expiryDateFromDays(expiryDays);
+        item.days_to_expiry=Number(expiryDays);
+      }
+      await saveMealData();
+      showToast("Updated — "+item.name);
+    }
+    S.quick_add_update_mode=null;S.quick_add_search="";
+    render();
+  });
+  document.getElementById("qa-upd-cancel")?.addEventListener("click",()=>{S.quick_add_update_mode=null;render();});
+  // Default location change
+  document.getElementById("qa-default-loc")?.addEventListener("change",e=>{S.quick_add_last_location=e.target.value;});
+  // Batch items — edit / remove
   document.querySelectorAll(".quickadd-item").forEach(el=>el.addEventListener("click",e=>{
     if(e.target.classList.contains("quickadd-remove"))return;
     const idx=Number(el.dataset.idx);
     const ing=S.quick_add_list[idx];
     if(!ing)return;
-    // Open ingredient edit sheet pre-filled
     S.ingredient_edit={...ing};
     S.show_add_ingredient=true;
     render();
@@ -4517,13 +4785,56 @@ function bindMain(){
     render();
   }));
   document.getElementById("quickadd-save-all")?.addEventListener("click",async()=>{
+    const defaultLoc=document.getElementById("qa-default-loc")?.value||getPantryLocations()[0]||"";
     for(const ing of S.quick_add_list){
       const {_missing,...clean}=ing;
+      if(!clean.location)clean.location=defaultLoc;
       INGREDIENT_INVENTORY.push(clean);
     }
-    S.show_quick_add=false;S.quick_add_list=[];
+    S.show_quick_add=false;S.quick_add_list=[];S.quick_add_search="";S.quick_add_matches=[];S.quick_add_update_mode=null;
     await saveMealData();render();
   });
+
+  // ── v9.2 — Audit session bindings ────────────────
+  document.getElementById("btn-start-audit")?.addEventListener("click",()=>{
+    S.audit_session_active=true;
+    S.audit_session_confirmed={};
+    S.audit_session_start=new Date().toISOString();
+    // Default: expand all locations
+    const locs=getPantryLocations();
+    locs.forEach(l=>{S.audit_expanded_locations[l]=true;});
+    render();
+  });
+  document.getElementById("btn-finish-audit")?.addEventListener("click",()=>{
+    // Surface unconfirmed items
+    const confirmed=S.audit_session_confirmed||{};
+    const unconfirmed=INGREDIENT_INVENTORY.filter(i=>!confirmed[i.id]);
+    S.audit_session_active=false;
+    if(unconfirmed.length){
+      showToast(`Audit done. ${Object.keys(confirmed).length} confirmed · ${unconfirmed.length} not seen — still in inventory.`,"green");
+    } else {
+      showToast(`Audit complete — all ${Object.keys(confirmed).length} items confirmed.`,"green");
+    }
+    render();
+  });
+  // Location header collapse/expand
+  document.querySelectorAll(".audit-loc-header").forEach(h=>h.addEventListener("click",()=>{
+    const loc=h.dataset.loc;
+    S.audit_expanded_locations[loc]=!S.audit_expanded_locations[loc];
+    if(S.audit_expanded_locations[loc]===undefined)S.audit_expanded_locations[loc]=false;
+    render();
+  }));
+  // Confirm present
+  document.querySelectorAll(".audit-confirm").forEach(btn=>btn.addEventListener("click",e=>{
+    e.stopPropagation();
+    const id=btn.dataset.id;
+    if(S.audit_session_confirmed[id]){
+      delete S.audit_session_confirmed[id];
+    } else {
+      S.audit_session_confirmed[id]=true;
+    }
+    render();
+  }));
   document.getElementById("btn-copy-prompt")?.addEventListener("click",()=>{
     const p=S.meal_prompt||generateMealPrompt();
     navigator.clipboard.writeText(p).then(()=>{
