@@ -1588,6 +1588,38 @@ function gateColour(ci){
   return gate;
 }
 
+// ── Garmin calibration ratio (v10.2) ─────────────
+function calcGarminRatio(ci){
+  const baseline_bb  = Number((PROFILE&&PROFILE.garmin_baseline_bb_recharge)||0);
+  const baseline_hrv = Number((PROFILE&&PROFILE.garmin_baseline_hrv)||0);
+  const today_bb  = ci.garmin_today_bb_recharge;
+  const today_hrv = ci.garmin_today_hrv;
+
+  const bb_val  = today_bb && today_bb!=="skip" && baseline_bb>0  ? Number(today_bb)/baseline_bb  : null;
+  const hrv_val = today_hrv && today_hrv!=="skip" && baseline_hrv>0 ? Number(today_hrv)/baseline_hrv : null;
+
+  let ratio = 1.0;
+  if(bb_val!==null && hrv_val!==null) ratio = (bb_val+hrv_val)/2;
+  else if(bb_val!==null) ratio = bb_val;
+  else if(hrv_val!==null) ratio = hrv_val;
+
+  return Math.min(1.2, Math.max(0.4, ratio));
+}
+
+function garminCalibrationNote(ci){
+  const today_bb  = ci.garmin_today_bb_recharge;
+  const today_hrv = ci.garmin_today_hrv;
+  const baseline_bb  = Number((PROFILE&&PROFILE.garmin_baseline_bb_recharge)||0);
+  const baseline_hrv = Number((PROFILE&&PROFILE.garmin_baseline_hrv)||0);
+  if((!today_bb || today_bb==="skip") && (!today_hrv || today_hrv==="skip")) return null;
+  const ratio = calcGarminRatio(ci);
+  const pct = Math.round(ratio*100);
+  const parts=[];
+  if(today_bb&&today_bb!=="skip"&&baseline_bb>0) parts.push(`BB +${today_bb}/+${baseline_bb}`);
+  if(today_hrv&&today_hrv!=="skip"&&baseline_hrv>0) parts.push(`HRV ${today_hrv}/${baseline_hrv}ms`);
+  return parts.length ? `${parts.join(" · ")} → ${pct}% capacity` : null;
+}
+
 function euBudget(ci,bankingMod){
   const e=ci.energy??5;
   const bb=ci.battery??50;
@@ -1608,6 +1640,12 @@ function euBudget(ci,bankingMod){
     base = DEFAULT_EU.low;
   } else {
     base = DEFAULT_EU.typical;
+  }
+
+  // Garmin calibration ratio (v10.2) — applies to typical base only
+  const garminRatio = calcGarminRatio(ci);
+  if(garminRatio !== 1.0 && base === DEFAULT_EU.typical){
+    base = Math.round(DEFAULT_EU.typical * garminRatio);
   }
 
   // Sleep score modifier
@@ -1740,7 +1778,27 @@ function forecastEuForDate(dateStr){
 }
 
 function getEventsForDate(dateStr){
-  return EVENTS.filter(e=>e.date===dateStr);
+  const direct = EVENTS.filter(e=>e.date===dateStr);
+  // Include virtual spread-day copies from events on preceding days
+  const spread = [];
+  EVENTS.forEach(ev=>{
+    if(!ev.spread_days || ev.spread_days<=1) return;
+    if(ev.date===dateStr) return; // already included in direct
+    for(let d=1;d<ev.spread_days;d++){
+      if(dateAddDays(ev.date,d)===dateStr){
+        const perDay = ev.eu_cost / ev.spread_days;
+        spread.push({
+          ...ev,
+          id: ev.id+"_spread_"+d,
+          date: dateStr,
+          eu_cost: Math.round(perDay*10)/10,
+          title: ev.title+" (day "+(d+1)+")",
+          _spread_virtual: true,
+        });
+      }
+    }
+  });
+  return [...direct, ...spread];
 }
 
 // ═══════════════════════════════════════════════════
@@ -1907,6 +1965,8 @@ const CI_STEPS=[
   {id:"sleep",q:"Sleep score?",hint:"Garmin sleep score or estimate 0–100",type:"slider",min:0,max:100,def:65,
     lbl:v=>v<40?"Poor":v<60?"Fair":v<80?"Good":"Excellent",col:v=>v<40?"#f87171":v<60?"#fb923c":v<80?"#fbbf24":"#34d399"},
   {id:"sleep_hours",q:"Sleep duration?",hint:"Hours and minutes shown in Garmin Connect — enables Sleep <6h EU modifier",type:"sleep_duration",ph:""},
+  {id:"garmin_today_bb_recharge",q:"Body Battery recharge last night?",hint:"Garmin Connect → Body Battery → 1 Day. Shows how many points you recovered overnight. Tap Skip if not available.",type:"number_or_skip",unit:"points",ph:"e.g. 35"},
+  {id:"garmin_today_hrv",q:"HRV last night?",hint:"Garmin Connect → HRV Status → overnight reading. Tap Skip if not available.",type:"number_or_skip",unit:"ms",ph:"e.g. 36"},
   {id:"energy",q:"Your energy right now?",hint:"0 = nothing, 10 = best in months",type:"slider",min:0,max:10,def:5,
     lbl:v=>v<3?"Very low":v<5?"Low":v<7?"Moderate":"Good",col:v=>v<3?"#f87171":v<5?"#fb923c":v<7?"#fbbf24":"#34d399"},
   // v6.0 — te whare tapa whā (non-physical walls)
@@ -2620,12 +2680,20 @@ function renderCheckin(){
       <input type="number" id="sleep-mins" class="text-in" style="width:80px;text-align:center;font-size:1.1rem" min="0" max="59" value="${mins}" placeholder="min"/>
       <span style="color:var(--muted);font-size:.875rem">min</span>
     </div>`;
+  }else if(step.type==="number_or_skip"){
+    inputH=`<div style="display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <input type="number" id="num-skip-in" class="text-in" style="width:90px;text-align:center;font-size:1.1rem" value="${val==="skip"?"":val}" placeholder="${step.ph}"/>
+        <span style="color:var(--muted);font-size:.875rem">${step.unit}</span>
+      </div>
+      <button id="ci-skip-btn" style="background:none;border:1px solid var(--border)!important;border-radius:8px;padding:8px 16px;font-size:.78rem;color:var(--muted);cursor:pointer;align-self:flex-start">Skip — not available today</button>
+    </div>`;
   }else if(step.type==="number"){
     inputH=`<div style="display:flex;align-items:center;gap:10px"><input type="number" id="num-in" class="text-in" style="width:90px;text-align:center;font-size:1.1rem" value="${val}" placeholder="${step.ph}"/><span style="color:var(--muted);font-size:.875rem">${step.unit}</span></div>`;
   }else{
     inputH=`<textarea id="txt-in" class="text-in" style="width:100%;min-height:72px" placeholder="${step.ph}">${val}</textarea>`;
   }
-  const canGo=step.type==="slider"||step.type==="text"||step.type==="sleep_duration"||(step.type==="choice"&&val)||(step.type==="multi"&&val.length)||(step.type==="number"&&val);
+  const canGo=step.type==="slider"||step.type==="text"||step.type==="sleep_duration"||step.type==="number_or_skip"||(step.type==="choice"&&val)||(step.type==="multi"&&val.length)||(step.type==="number"&&val);
   const isLast=S.ci_step===CI_STEPS.length-1;
   // v9.1 — time-aware check-in label
   const ciHour=new Date().getHours();
@@ -2666,6 +2734,14 @@ function bindCheckin(){
   }));
   document.getElementById("num-in")?.addEventListener("input",e=>{S.ci[step.id]=e.target.value;document.getElementById("ci-next").disabled=!e.target.value;});
   document.getElementById("txt-in")?.addEventListener("input",e=>{S.ci[step.id]=e.target.value;});
+  // number_or_skip fields (Garmin recharge, HRV)
+  document.getElementById("num-skip-in")?.addEventListener("input",e=>{
+    S.ci[step.id]=e.target.value||"";
+  });
+  document.getElementById("ci-skip-btn")?.addEventListener("click",()=>{
+    S.ci[step.id]="skip";
+    if(S.ci_step<CI_STEPS.length-1){S.ci_step++;render();}
+  });
   // v9.1 — sleep duration: hours + minutes fields → store as decimal hours
   const sleepHrsEl=document.getElementById("sleep-hrs");
   const sleepMinsEl=document.getElementById("sleep-mins");
@@ -3242,22 +3318,25 @@ function buildCanvasBlocksForDate(dateStr){
   const gate = isToday ? (S.gate||"green") : "green";
   const blocks=[];
 
-  // 1. Rock blocks: scheduled EVENTS on this date
-  const dayEvents = EVENTS.filter(e=>e.date===dateStr).sort((a,b)=>(a.start_time||"99:99").localeCompare(b.start_time||"99:99"));
+  // 1. Rock blocks: scheduled EVENTS on this date (using getEventsForDate for spread support)
+  const dayEvents = getEventsForDate(dateStr).sort((a,b)=>(a.start_time||"99:99").localeCompare(b.start_time||"99:99"));
   dayEvents.forEach(ev=>{
     const isRestorative = RESTORATIVE_PRACTICES.some(p=>p.name===ev.title||p.id===ev.template_id);
     const rp = isRestorative ? RESTORATIVE_PRACTICES.find(p=>p.name===ev.title||p.id===ev.template_id) : null;
+    // For day-1 of spread events, show per-day cost
+    const spread = (!ev._spread_virtual && ev.spread_days>1) ? ev.spread_days : 1;
+    const perDayEu = spread>1 ? Math.round((ev.eu_cost/spread)*10)/10 : (ev.eu_cost||0);
     blocks.push({
       id:"ev_"+ev.id,
-      event_id:ev.id,
+      event_id:ev._spread_virtual ? ev.id.replace(/_spread_\d+$/,"") : ev.id,
       title:ev.title,
       layer: isRestorative?"rock":"rock",
-      eu_cost: ev.eu_cost||0,
+      eu_cost: perDayEu,
       return_eu: rp?.return_eu||0,
       return_note: rp?.return_note||"",
       restorative: isRestorative,
       start_time: ev.start_time||null,
-      duration_mins: Math.round((ev.eu_cost||2)*25), // ~25 min per EU as rough estimate
+      duration_mins: Math.round((perDayEu||2)*25),
       tethered: false,
       done: false,
     });
@@ -3475,6 +3554,9 @@ function renderCanvasDayView(dateStr, today, viewToggle){
   const {total, committed, discretionary, overloaded} = calcCanvasEu(dateStr, blocks);
 
   // EU 3-part display
+  // Garmin calibration note (v10.2)
+  const garminNote = isToday ? garminCalibrationNote(S.ci||{}) : null;
+
   const euBanner = overloaded
     ? `<div class="in" style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px">
         <div style="font-size:.82rem;font-weight:500;color:var(--red);margin-bottom:3px">Today's necessities fill your budget</div>
@@ -3504,6 +3586,7 @@ function renderCanvasDayView(dateStr, today, viewToggle){
           <div style="height:100%;width:${total>0?Math.min(100,Math.round(committed/total*100)):0}%;background:var(--orange);border-radius:2px 0 0 2px"></div>
           <div style="height:100%;width:${total>0?Math.min(100,Math.round(discretionary/total*100)):0}%;background:var(--green);opacity:.6;border-radius:0 2px 2px 0"></div>
         </div>
+        ${garminNote ? `<div style="margin-top:8px;font-size:.68rem;color:var(--muted);border-top:1px solid var(--border);padding-top:7px">📡 Budget calibrated: ${garminNote}</div>` : ""}
       </div>`;
 
   // Date nav
@@ -3636,13 +3719,22 @@ function renderCanvasWeekView(today, viewToggle){
       const isDragOver = S.canvas_week_drag_over===d;
 
       // Apply layer filter to events shown in week view
-      const filteredEvents = dayEvents.filter(ev=>{
-        const isRp = RESTORATIVE_PRACTICES.some(p=>p.name===ev.title);
-        // All events are rock-layer (appointments + restorative)
-        if(layerFilter==="rocks") return true; // rocks = all events
-        if(layerFilter==="rocks_pebbles") return true; // events are rocks — always show
-        return true; // "all" shows everything
-      });
+      // Rock events = EVENTS (appointments + restorative)
+      // Pebble items = canvas_blocks pebbles for today, or pool items for future days
+      const filteredEvents = dayEvents; // Rock events always shown (all EVENTS are rocks)
+
+      // For Rocks + pebbles and All layers: also show pebble canvas blocks
+      let pebbleChips = [];
+      if(layerFilter !== "rocks"){
+        const dayBlocks = isToday && S.canvas_blocks && S.canvas_blocks.length
+          ? S.canvas_blocks.filter(b=>b.layer==="pebble" && b.title)
+          : buildCanvasBlocksForDate(d).filter(b=>b.layer==="pebble");
+        // For "all" also show sand blocks
+        const sandChips = layerFilter === "all"
+          ? (isToday && S.canvas_blocks ? S.canvas_blocks.filter(b=>b.layer==="sand") : buildCanvasBlocksForDate(d).filter(b=>b.layer==="sand"))
+          : [];
+        pebbleChips = [...dayBlocks, ...sandChips];
+      }
 
       return `<div class="card canvas-week-day${isDragOver?" drag-over":""}" data-date="${d}"
         style="margin-bottom:8px${isToday?";border-color:var(--accent);border-width:1.5px":""}${overloaded?";background:rgba(248,113,113,.03)":""}${isDragOver?";border-color:var(--green)":""}">
@@ -3660,16 +3752,20 @@ function renderCanvasWeekView(today, viewToggle){
             ${overloaded?`<div style="font-size:.6rem;color:var(--red)">rest-only day</div>`:""}
           </div>
         </div>
-        ${filteredEvents.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">
+        ${(filteredEvents.length || pebbleChips.length)?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">
           ${filteredEvents.map(ev=>{
             const isRp=RESTORATIVE_PRACTICES.some(p=>p.name===ev.title);
-            return `<div draggable="true" class="canvas-week-block" data-event-id="${ev.id}" data-from-date="${d}"
+            return `<div draggable="true" class="canvas-week-block canvas-week-chip-edit" data-event-id="${ev.id}" data-from-date="${d}"
               style="display:inline-flex;align-items:center;gap:4px;background:${layerCol(isRp?"rock":"rock",0.12)};border:1px solid ${layerCol(isRp?"rock":"rock",0.3)};border-radius:6px;padding:3px 7px;font-size:.7rem;color:var(--subtle);cursor:grab">
               ${isRp?"🌿 ":""}${escH(ev.title)}
               <span style="color:${layerCol("rock")};font-weight:500;margin-left:2px">${ev.eu_cost}eu</span>
               ${isRp&&ev.return_eu?`<span style="color:${layerCol("pebble")};font-size:.6rem">+${ev.return_eu}</span>`:""}
             </div>`;
           }).join("")}
+          ${pebbleChips.map(b=>`<div style="display:inline-flex;align-items:center;gap:4px;background:${layerCol(b.layer,0.10)};border:1px solid ${layerCol(b.layer,0.25)};border-radius:6px;padding:3px 7px;font-size:.7rem;color:var(--subtle);opacity:${layerFilter==="all"&&b.layer==="sand"?".7":"1"}">
+            ${escH(b.title)}
+            <span style="color:${layerCol(b.layer)};font-weight:500;margin-left:2px">${b.eu_cost}eu</span>
+          </div>`).join("")}
         </div>`:""}
         <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;display:flex;gap:1px">
           ${committed>0?`<div style="height:100%;width:${Math.min(100,Math.round(committed/Math.max(total,1)*100))}%;background:var(--orange);border-radius:2px 0 0 2px"></div>`:""}
@@ -4841,6 +4937,14 @@ function renderEventSheet(){
       </div>
       <div class="field"><label class="field-label">Notes (optional)</label>
         <textarea id="ev-notes" class="text-in" style="width:100%;min-height:60px">${ev.notes||""}</textarea></div>
+      <div class="field">
+        <label class="field-label">Spread cost over multiple days <span style="color:var(--muted);font-weight:300">(optional)</span></label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <input type="number" id="ev-spread" class="text-in" style="width:60px" value="${ev.spread_days||1}" min="1" max="14" placeholder="1"/>
+          <span style="color:var(--muted);font-size:.8rem">days — EU divided evenly from event date</span>
+        </div>
+        <p style="font-size:.68rem;color:var(--muted);margin-top:3px">e.g. dog-sitting trip: set to 2 to spread departure + away-night cost across both days</p>
+      </div>
       ${lateL?`<div style="background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:.78rem;color:var(--yellow)">⚠ Late luteal phase on this date — capacity ~25% lower. Consider rescheduling if possible.</div>`:""}
       <button class="btn btn-primary" id="save-event" style="width:100%">${isEdit?"Save changes":"Add event"}</button>
     </div>
@@ -5337,6 +5441,21 @@ function renderSettings(){
         <input type="date" id="s-period" class="text-in" style="width:180px" value="${p.last_period_start||''}"/></div>
       <p style="color:var(--muted);font-size:.72rem;margin-bottom:20px">Leave blank to disable phase tracking.</p>
 
+      <h3 style="margin-bottom:8px;margin-top:20px">Calibrate to my body</h3>
+      <p style="color:var(--muted);font-size:.75rem;margin-bottom:12px;line-height:1.6">Your overnight Garmin readings calibrate the EU budget to your actual physiology rather than population averages. Find these in Garmin Connect.</p>
+      <div style="display:flex;gap:10px;margin-bottom:4px">
+        <div class="field" style="flex:1">
+          <label class="field-label">Baseline BB recharge</label>
+          <input type="number" id="s-garmin-bb" class="text-in" style="width:100%" value="${p.garmin_baseline_bb_recharge||''}" placeholder="e.g. 40"/>
+          <p style="font-size:.67rem;color:var(--muted);margin-top:3px">Garmin Connect → Body Battery → 1 Day. Points recovered on a typical stable night.</p>
+        </div>
+        <div class="field" style="flex:1">
+          <label class="field-label">Baseline overnight HRV</label>
+          <input type="number" id="s-garmin-hrv" class="text-in" style="width:100%" value="${p.garmin_baseline_hrv||''}" placeholder="e.g. 38"/>
+          <p style="font-size:.67rem;color:var(--muted);margin-top:3px">Garmin Connect → HRV Status. Typical overnight HRV on a stable night (ms).</p>
+        </div>
+      </div>
+      ${(p.garmin_baseline_bb_recharge||p.garmin_baseline_hrv) ? `<p style="font-size:.72rem;color:var(--muted);margin-bottom:16px">When you enter these in morning check-in, the app calculates your capacity ratio and adjusts your EU budget accordingly.</p>` : `<p style="font-size:.72rem;color:var(--muted);margin-bottom:16px">Optional — leave blank to use standard budgets. If you're not sure, check Garmin Connect history for a week of stable nights.</p>`}
 
       <h3 style="margin-bottom:12px;margin-top:20px">Pantry locations</h3>
       <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Your storage locations — shown in this order during pantry audit. Rename or reorder freely.</p>
@@ -5411,6 +5530,9 @@ function bindSettings(){
       // v9.2 — pantry locations
       pantry_locations: Array.from(document.querySelectorAll(".pantry-loc-input"))
         .map(inp=>inp.value.trim()).filter(Boolean),
+      // v10.2 — Garmin calibration baselines
+      garmin_baseline_bb_recharge: Number(document.getElementById("s-garmin-bb")?.value)||null,
+      garmin_baseline_hrv: Number(document.getElementById("s-garmin-hrv")?.value)||null,
     };
     try{
       await sbSaveProfile(PROFILE);
@@ -5634,6 +5756,42 @@ function bindMain(){
     render();
   }));
 
+  // Feature 3 (v10.2): tap event chip in week view → open event edit sheet
+  // Uses click + small drag threshold to distinguish tap from drag
+  document.querySelectorAll(".canvas-week-chip-edit").forEach(chip=>{
+    let _tapStartX=0, _tapStartY=0, _tapMoved=false;
+    chip.addEventListener("mousedown",e=>{_tapStartX=e.clientX;_tapStartY=e.clientY;_tapMoved=false;});
+    chip.addEventListener("mousemove",e=>{
+      if(Math.abs(e.clientX-_tapStartX)>5||Math.abs(e.clientY-_tapStartY)>5)_tapMoved=true;
+    });
+    chip.addEventListener("click",e=>{
+      if(_tapMoved)return; // was a drag, not a tap
+      e.stopPropagation(); // don't bubble to day background
+      const evId=chip.dataset.eventId;
+      if(!evId)return;
+      const ev=EVENTS.find(e=>e.id===evId||e.id===Number(evId));
+      if(!ev)return;
+      S.event_edit={...ev};
+      S.show_event_sheet=true;
+      render();
+    });
+    // Touch support
+    chip.addEventListener("touchstart",e=>{_tapStartX=e.touches[0].clientX;_tapStartY=e.touches[0].clientY;_tapMoved=false;},{passive:true});
+    chip.addEventListener("touchmove",e=>{
+      if(Math.abs(e.touches[0].clientX-_tapStartX)>8||Math.abs(e.touches[0].clientY-_tapStartY)>8)_tapMoved=true;
+    },{passive:true});
+    chip.addEventListener("touchend",e=>{
+      if(_tapMoved)return;
+      e.stopPropagation();
+      const evId=chip.dataset.eventId;
+      const ev=EVENTS.find(ev=>ev.id===evId||ev.id===Number(evId));
+      if(!ev)return;
+      S.event_edit={...ev};
+      S.show_event_sheet=true;
+      render();
+    });
+  });
+
   // ── Drag and drop (day view — reorder blocks) ─
   let _dragId=null;
   document.querySelectorAll(".canvas-block[draggable='true']").forEach(el=>{
@@ -5641,6 +5799,7 @@ function bindMain(){
       _dragId=el.dataset.blockId;
       S.canvas_drag_id=_dragId;
       e.dataTransfer.effectAllowed="move";
+      e.dataTransfer.setData("text/plain", _dragId); // required for Firefox + iOS polyfill
       el.style.opacity=".4";
     });
     el.addEventListener("dragend",()=>{
@@ -5651,9 +5810,12 @@ function bindMain(){
       render();
     });
   });
+  // Allow dragover on the section container (needed for drop to fire on children)
   document.querySelectorAll(".canvas-block").forEach(el=>{
     el.addEventListener("dragover",e=>{
+      if(!_dragId)return;
       e.preventDefault();
+      e.stopPropagation();
       e.dataTransfer.dropEffect="move";
       const targetId=el.dataset.blockId;
       if(targetId&&targetId!==_dragId){
@@ -5662,16 +5824,18 @@ function bindMain(){
     });
     el.addEventListener("drop",e=>{
       e.preventDefault();
+      e.stopPropagation();
       const toId=el.dataset.blockId;
       if(!_dragId||!toId||_dragId===toId)return;
-      const from=S.canvas_blocks.findIndex(b=>b.id===_dragId);
-      const to=S.canvas_blocks.findIndex(b=>b.id===toId);
+      const blocks=S.canvas_blocks||[];
+      const from=blocks.findIndex(b=>b.id===_dragId);
+      const to=blocks.findIndex(b=>b.id===toId);
       if(from===-1||to===-1)return;
-      const fromBlock=S.canvas_blocks[from];
+      const fromBlock=blocks[from];
       if(fromBlock.layer==="rock"&&!fromBlock.restorative){
         if(!confirm("Moving a fixed appointment — are you sure?"))return;
       }
-      const arr=[...S.canvas_blocks];
+      const arr=[...blocks];
       const [moved]=arr.splice(from,1);
       arr.splice(to,0,moved);
       S.canvas_blocks=arr;
@@ -6567,11 +6731,12 @@ function bindEventSheet(){
     const recovery=Number(document.getElementById("ev-recovery")?.value)||getEventTier(eu).recovery;
     const notes=document.getElementById("ev-notes")?.value||"";
     const start_time=document.getElementById("ev-time")?.value||null;
+    const spread_days=Math.max(1,Number(document.getElementById("ev-spread")?.value)||1);
     const type=S.event_edit?.type||"medical";
     if(!title||!date){alert("Title and date are required.");return;}
     // v9.0: start_time now saved to Supabase (requires ALTER TABLE pacing_arc_events ADD COLUMN start_time text)
-    const data={device_id:DEVICE_ID(),date,title,type,eu_cost:eu,buffer_eu:buffer,recovery_days:recovery,notes,start_time:start_time||null};
-    const localData={...data,start_time}; // keep local state consistent
+    const data={device_id:DEVICE_ID(),date,title,type,eu_cost:eu,buffer_eu:buffer,recovery_days:recovery,notes,start_time:start_time||null,spread_days:spread_days>1?spread_days:null};
+    const localData={...data,start_time,spread_days};
     try{
       if(S.event_edit?.id){
         await sbUpdate("pacing_arc_events",S.event_edit.id,data);
