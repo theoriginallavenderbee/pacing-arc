@@ -89,7 +89,7 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// PACING ARC v9.0
+// PACING ARC v9.1
 // v4.1: Sleep score EU, weighted gate, orthostatic costs
 // v4.2: Weather, rest timer, overexertion, time-of-day
 // v4.3: Cycle calc, banking planner, events, forecast
@@ -704,8 +704,9 @@ async function init(){
   if("Notification" in window)S.notif_permission=Notification.permission;
 
   // v8.2 — Cross-device sync: re-fetch on app focus
+  // v9.1 fix: was only firing on screen==="main", now fires on home too
   document.addEventListener("visibilitychange",async()=>{
-    if(document.visibilityState==="visible"&&S.screen==="main"&&PROFILE){
+    if(document.visibilityState==="visible"&&(S.screen==="main"||S.screen==="home")&&PROFILE){
       try{
         const today=await sbGetToday();
         if(today){
@@ -1474,7 +1475,7 @@ const CI_STEPS=[
   {id:"rhr",q:"Resting HR this morning?",hint:"From your Garmin overnight reading",type:"number",unit:"bpm",ph:"e.g. 62"},
   {id:"sleep",q:"Sleep score?",hint:"Garmin sleep score or estimate 0–100",type:"slider",min:0,max:100,def:65,
     lbl:v=>v<40?"Poor":v<60?"Fair":v<80?"Good":"Excellent",col:v=>v<40?"#f87171":v<60?"#fb923c":v<80?"#fbbf24":"#34d399"},
-  {id:"sleep_hours",q:"Sleep duration?",hint:"Hours shown in Garmin Connect — enables Sleep <6h EU modifier",type:"number",unit:"hrs",ph:"e.g. 6.5"},
+  {id:"sleep_hours",q:"Sleep duration?",hint:"Hours and minutes shown in Garmin Connect — enables Sleep <6h EU modifier",type:"sleep_duration",ph:""},
   {id:"energy",q:"Your energy right now?",hint:"0 = nothing, 10 = best in months",type:"slider",min:0,max:10,def:5,
     lbl:v=>v<3?"Very low":v<5?"Low":v<7?"Moderate":"Good",col:v=>v<3?"#f87171":v<5?"#fb923c":v<7?"#fbbf24":"#34d399"},
   // v6.0 — te whare tapa whā (non-physical walls)
@@ -2053,7 +2054,7 @@ function renderHome(){
     <div style="width:100%;max-width:360px;display:flex;flex-direction:column;gap:10px" class="in">
       ${checkinDone
         ?`<button class="btn btn-secondary" id="btn-voluntary-home" style="width:100%;border-color:rgba(148,163,184,.3)!important;color:var(--subtle);font-size:.875rem">↺ Energy shift check-in</button>`
-        :`<button class="btn btn-primary" id="btn-start" style="width:100%">🌅 Morning check-in</button>`}
+        :`<button class="btn btn-primary" id="btn-start" style="width:100%">${(()=>{const h=new Date().getHours();return h<12?"🌅 Morning check-in":h<17?"🌤 Afternoon check-in":"🌙 Evening check-in";})()}</button>`}
       ${todayLoaded?`<button class="btn btn-secondary" id="btn-resume" style="width:100%">📋 Resume today's plan</button>`:""}
       <button class="btn btn-secondary" id="btn-events" style="width:100%">📅 Events & planner</button>
       ${S.in_crash?`<button class="btn" id="btn-crash" style="width:100%;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.3)!important;color:var(--red)">🚨 Crash containment</button>`:""}
@@ -2177,19 +2178,33 @@ function renderCheckin(){
     inputH=`<div class="choices">${step.opts.map((o,i)=>`<button class="choice${val===o?" sel":""}" data-v="${o}" style="${val===o?`border-color:${step.cols[i]}!important;background:${step.cols[i]}18;color:${step.cols[i]}`:""}">${["🔴","🟠","🟡","🟢","⚪"][i]||"•"} ${o}</button>`).join("")}</div>`;
   }else if(step.type==="multi"){
     inputH=`<div class="tags">${step.opts.map(o=>`<button class="tag${val.includes(o)?" sel":""}" data-v="${o}">${o}</button>`).join("")}</div>`;
+  }else if(step.type==="sleep_duration"){
+    // Hours + minutes dual input (v9.1)
+    const totalHrs = val !== "" && val !== undefined ? Number(val) : "";
+    const hrs = totalHrs !== "" ? Math.floor(totalHrs) : "";
+    const mins = totalHrs !== "" ? Math.round((totalHrs - Math.floor(totalHrs)) * 60) : "";
+    inputH=`<div style="display:flex;align-items:center;gap:10px">
+      <input type="number" id="sleep-hrs" class="text-in" style="width:80px;text-align:center;font-size:1.1rem" min="0" max="24" value="${hrs}" placeholder="h"/>
+      <span style="color:var(--muted);font-size:.875rem">hrs</span>
+      <input type="number" id="sleep-mins" class="text-in" style="width:80px;text-align:center;font-size:1.1rem" min="0" max="59" value="${mins}" placeholder="min"/>
+      <span style="color:var(--muted);font-size:.875rem">min</span>
+    </div>`;
   }else if(step.type==="number"){
     inputH=`<div style="display:flex;align-items:center;gap:10px"><input type="number" id="num-in" class="text-in" style="width:90px;text-align:center;font-size:1.1rem" value="${val}" placeholder="${step.ph}"/><span style="color:var(--muted);font-size:.875rem">${step.unit}</span></div>`;
   }else{
     inputH=`<textarea id="txt-in" class="text-in" style="width:100%;min-height:72px" placeholder="${step.ph}">${val}</textarea>`;
   }
-  const canGo=step.type==="slider"||step.type==="text"||(step.type==="choice"&&val)||(step.type==="multi"&&val.length)||(step.type==="number"&&val);
+  const canGo=step.type==="slider"||step.type==="text"||step.type==="sleep_duration"||(step.type==="choice"&&val)||(step.type==="multi"&&val.length)||(step.type==="number"&&val);
   const isLast=S.ci_step===CI_STEPS.length-1;
+  // v9.1 — time-aware check-in label
+  const ciHour=new Date().getHours();
+  const ciLabel=ciHour<12?"Morning check-in":ciHour<17?"Afternoon check-in":"Evening check-in";
   return `<div style="display:flex;flex-direction:column;min-height:100vh" class="safe-t">
     <div class="header"><button class="btn-ghost" id="ci-back">←</button>
       <div style="flex:1"><div style="height:3px;background:var(--bg3);border-radius:2px"><div style="height:100%;width:${pct}%;border-radius:2px;background:linear-gradient(90deg,var(--accent),var(--accent2))"></div></div></div>
       <span style="color:var(--muted);font-size:.75rem">${S.ci_step+1}/${CI_STEPS.length}</span></div>
     <div class="section in" style="padding-top:24px">
-      <h3 style="margin-bottom:6px">Morning check-in</h3>
+      <h3 style="margin-bottom:6px">${ciLabel}</h3>
       <h2 style="margin-bottom:8px">${step.q}</h2>
       <p style="color:var(--muted);font-size:.8rem;margin-bottom:22px">${step.hint}</p>
       ${inputH}
@@ -2220,6 +2235,20 @@ function bindCheckin(){
   }));
   document.getElementById("num-in")?.addEventListener("input",e=>{S.ci[step.id]=e.target.value;document.getElementById("ci-next").disabled=!e.target.value;});
   document.getElementById("txt-in")?.addEventListener("input",e=>{S.ci[step.id]=e.target.value;});
+  // v9.1 — sleep duration: hours + minutes fields → store as decimal hours
+  const sleepHrsEl=document.getElementById("sleep-hrs");
+  const sleepMinsEl=document.getElementById("sleep-mins");
+  if(sleepHrsEl||sleepMinsEl){
+    const updateSleepDuration=()=>{
+      const h=Number(sleepHrsEl?.value||0);
+      const m=Number(sleepMinsEl?.value||0);
+      if(sleepHrsEl?.value!==undefined&&sleepHrsEl?.value!==""||sleepMinsEl?.value!==undefined&&sleepMinsEl?.value!==""){
+        S.ci[step.id]=h+m/60;
+      }
+    };
+    sleepHrsEl?.addEventListener("input",updateSleepDuration);
+    sleepMinsEl?.addEventListener("input",updateSleepDuration);
+  }
   document.getElementById("ci-next")?.addEventListener("click",()=>{
     if(S.ci_step<CI_STEPS.length-1){S.ci_step++;render();return;}
     S.gate=gateColour(S.ci);
