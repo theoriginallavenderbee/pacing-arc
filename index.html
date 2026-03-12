@@ -89,7 +89,7 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// PACING ARC v9.2
+// PACING ARC v9.3
 // v4.1: Sleep score EU, weighted gate, orthostatic costs
 // v4.2: Weather, rest timer, overexertion, time-of-day
 // v4.3: Cycle calc, banking planner, events, forecast
@@ -111,6 +111,9 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 // v9.1: cross-device sync fix, sleep hours+minutes, time-aware check-in label, pantry seeded
 // v9.2: pantry UX overhaul — location audit view, configurable locations,
 //        search-first quick-add with variant matching, meal planning urgency-first view
+// v9.3: micro-adjustment layer, audit search + collapse-all, date-of-origin expiry,
+//        urgency field in sheet, omega dual tracking, fructan/lactose lookup tables,
+//        no-prep food list, go-to meals, mood pre-prompt, category auto-defaults
 // ═══════════════════════════════════════════════════
 
 const SB_URL = "https://wtdymvqlugmfwemqyvde.supabase.co";
@@ -176,6 +179,294 @@ function getUrgencyTier(item){
   if(item.urgency==="soon"||(days!=null&&days<=5))return"soon";
   return"normal";
 }
+
+// ═══════════════════════════════════════════════════
+// v9.3 — NUTRITIONAL LOOKUP TABLES
+// Based on Monash FODMAP research + nutritional databases
+// Structured for user extension; eventually replaced by v10 knowledge base
+// ═══════════════════════════════════════════════════
+
+// Fructan status. status: "high" | "threshold" | "low"
+const FRUCTAN_TABLE = {
+  "garlic":        {status:"high",      note:"Avoid — very high fructan"},
+  "onion":         {status:"high",      note:"Avoid — high fructan"},
+  "leek":          {status:"high",      note:"High fructan"},
+  "shallot":       {status:"high",      note:"High fructan"},
+  "spring onion":  {status:"threshold", note:"Green tops safe up to ¼ cup"},
+  "wheat":         {status:"high",      note:"High fructan — use GF alternatives"},
+  "rye":           {status:"high",      note:"High fructan"},
+  "barley":        {status:"high",      note:"High fructan"},
+  "broccoli":      {status:"threshold", note:"Safe up to ¾ cup, high fructan above"},
+  "cabbage":       {status:"threshold", note:"Safe up to 1 cup"},
+  "fennel":        {status:"threshold", note:"Safe up to ½ cup"},
+  "artichoke":     {status:"high",      note:"Very high fructan"},
+  "asparagus":     {status:"high",      note:"High fructan"},
+  "banana":        {status:"low",       note:"Low fructan — ripe bananas lowest"},
+  "strawberry":    {status:"threshold", note:"Safe up to ~5 medium berries"},
+  "blueberry":     {status:"low",       note:"Low fructan"},
+  "raspberry":     {status:"low",       note:"Low fructan"},
+  "blackberry":    {status:"low",       note:"Low fructan"},
+  "grapefruit":    {status:"low",       note:"Low fructan"},
+  "orange":        {status:"low",       note:"Low fructan"},
+  "lemon":         {status:"low",       note:"Low fructan"},
+  "lime":          {status:"low",       note:"Low fructan"},
+  "kiwi":          {status:"low",       note:"Low fructan"},
+  "tomato":        {status:"low",       note:"Low fructan"},
+  "carrot":        {status:"low",       note:"Low fructan"},
+  "potato":        {status:"low",       note:"Low fructan"},
+  "sweet potato":  {status:"threshold", note:"Safe up to ½ cup"},
+  "pumpkin":       {status:"low",       note:"Low fructan"},
+  "zucchini":      {status:"low",       note:"Low fructan"},
+  "courgette":     {status:"low",       note:"Low fructan"},
+  "eggplant":      {status:"low",       note:"Low fructan"},
+  "capsicum":      {status:"low",       note:"Low fructan"},
+  "spinach":       {status:"low",       note:"Low fructan"},
+  "kale":          {status:"low",       note:"Low fructan"},
+  "bok choy":      {status:"low",       note:"Low fructan"},
+  "rice":          {status:"low",       note:"Low fructan"},
+  "oat":           {status:"threshold", note:"Safe up to ⅓ cup dry oats"},
+  "quinoa":        {status:"low",       note:"Low fructan"},
+  "corn":          {status:"low",       note:"Low fructan"},
+  "lentil":        {status:"low",       note:"Low fructan — canned rinsed"},
+  "chickpea":      {status:"threshold", note:"Safe up to ¼ cup canned rinsed"},
+  "tofu":          {status:"low",       note:"Low fructan"},
+  "tempeh":        {status:"low",       note:"Low fructan"},
+  "peanut butter": {status:"threshold", note:"Safe ≤2 tbsp — avoid added inulin or HFCS"},
+  "peanut":        {status:"low",       note:"Low fructan ≤2 tbsp"},
+  "almond":        {status:"threshold", note:"Safe up to 10 almonds"},
+  "walnut":        {status:"low",       note:"Low fructan"},
+  "macadamia":     {status:"low",       note:"Low fructan"},
+  "coconut":       {status:"low",       note:"Low fructan"},
+  "ginger":        {status:"low",       note:"Low fructan"},
+  "chilli":        {status:"low",       note:"Low fructan"},
+  "miso":          {status:"threshold", note:"Safe up to 1 tbsp fermented — low fructan"},
+  "tahini":        {status:"low",       note:"Low fructan"},
+  "egg":           {status:"low",       note:"Fructan-free"},
+  "chicken":       {status:"low",       note:"Fructan-free"},
+  "beef":          {status:"low",       note:"Fructan-free"},
+  "lamb":          {status:"low",       note:"Fructan-free"},
+  "salmon":        {status:"low",       note:"Fructan-free"},
+  "tuna":          {status:"low",       note:"Fructan-free"},
+  "shrimp":        {status:"low",       note:"Fructan-free"},
+  "prawn":         {status:"low",       note:"Fructan-free"},
+};
+
+// Lactose status
+const LACTOSE_TABLE = {
+  "milk":              {lactose:true,  note:"High lactose — use lactose-free version"},
+  "cream":             {lactose:true,  note:"Contains lactose"},
+  "ice cream":         {lactose:true,  note:"High lactose"},
+  "ricotta":           {lactose:true,  note:"High lactose"},
+  "cream cheese":      {lactose:true,  note:"Contains lactose"},
+  "yoghurt":           {lactose:true,  note:"Contains lactose — lactose-free available"},
+  "yogurt":            {lactose:true,  note:"Contains lactose"},
+  "soft cheese":       {lactose:true,  note:"High lactose"},
+  "butter":            {lactose:false, note:"Very low lactose — generally fine"},
+  "cheddar":           {lactose:false, note:"Very low lactose"},
+  "parmesan":          {lactose:false, note:"Very low lactose"},
+  "hard cheese":       {lactose:false, note:"Very low lactose"},
+  "lactose-free milk": {lactose:false, note:"Lactose-free"},
+  "oat milk":          {lactose:false, note:"Lactose-free"},
+  "rice milk":         {lactose:false, note:"Lactose-free"},
+  "coconut milk":      {lactose:false, note:"Lactose-free"},
+  "almond milk":       {lactose:false, note:"Lactose-free"},
+  "soy milk":          {lactose:false, note:"Lactose-free"},
+};
+
+// Omega profile — directional, not precise
+// omega3/omega6: "high" | "medium" | "low"
+const OMEGA_TABLE = {
+  "salmon":          {omega3:"high",   omega6:"low",    note:"Excellent omega-3 source"},
+  "sardine":         {omega3:"high",   omega6:"low",    note:"Excellent omega-3 source"},
+  "mackerel":        {omega3:"high",   omega6:"low",    note:"High omega-3"},
+  "tuna":            {omega3:"medium", omega6:"low",    note:"Good omega-3"},
+  "trout":           {omega3:"high",   omega6:"low",    note:"High omega-3"},
+  "cod":             {omega3:"low",    omega6:"low",    note:"Lean, low in both"},
+  "flaxseed":        {omega3:"high",   omega6:"medium", note:"High ALA omega-3"},
+  "chia":            {omega3:"high",   omega6:"medium", note:"High ALA omega-3"},
+  "hemp seed":       {omega3:"medium", omega6:"medium", note:"Good ratio ~3:1"},
+  "walnut":          {omega3:"high",   omega6:"high",   note:"High omega-3 and omega-6"},
+  "almond":          {omega3:"low",    omega6:"high",   note:"High omega-6"},
+  "cashew":          {omega3:"low",    omega6:"high",   note:"High omega-6"},
+  "sunflower seed":  {omega3:"low",    omega6:"high",   note:"Very high omega-6"},
+  "pumpkin seed":    {omega3:"low",    omega6:"high",   note:"High omega-6"},
+  "peanut butter":   {omega3:"low",    omega6:"high",   note:"High omega-6 — rotate with others"},
+  "peanut":          {omega3:"low",    omega6:"high",   note:"High omega-6"},
+  "olive oil":       {omega3:"low",    omega6:"low",    note:"Mostly monounsaturated — good choice"},
+  "coconut oil":     {omega3:"low",    omega6:"low",    note:"Saturated — neutral ratio"},
+  "canola oil":      {omega3:"medium", omega6:"medium", note:"Moderate balance"},
+  "sunflower oil":   {omega3:"low",    omega6:"high",   note:"Very high omega-6 — minimise"},
+  "chicken":         {omega3:"low",    omega6:"medium", note:"Moderate omega-6"},
+  "beef":            {omega3:"low",    omega6:"medium", note:"Moderate omega-6"},
+  "lamb":            {omega3:"low",    omega6:"medium", note:"Moderate omega-6"},
+  "egg":             {omega3:"medium", omega6:"medium", note:"Good ratio — pasture-raised better"},
+  "tofu":            {omega3:"low",    omega6:"medium", note:"Moderate omega-6"},
+  "tempeh":          {omega3:"low",    omega6:"medium", note:"Moderate omega-6"},
+};
+
+// Category inference from ingredient name
+const CATEGORY_KEYWORDS = {
+  "protein":   ["chicken","beef","lamb","pork","fish","salmon","tuna","prawn","shrimp","tofu","tempeh","egg","lentil","chickpea","bean"],
+  "vegetable": ["broccoli","carrot","spinach","kale","capsicum","zucchini","courgette","eggplant","potato","sweet potato","pumpkin","cabbage","bok choy","leek","fennel","asparagus","tomato","cucumber","celery","onion","garlic","shallot","mushroom","corn","pea","ginger","chilli"],
+  "fruit":     ["banana","apple","pear","orange","lemon","lime","grapefruit","mango","pineapple","berry","berries","blueberry","raspberry","strawberry","kiwi","avocado","peach","plum","grape","melon"],
+  "grain":     ["rice","quinoa","oat","bread","pasta","noodle","flour","cereal","cracker","polenta","buckwheat","millet"],
+  "condiment": ["sauce","paste","miso","soy","tamari","vinegar","mustard","ketchup","tahini","hoisin","oyster","fish sauce","sriracha","jam","honey","dressing","oil"],
+  "dairy":     ["milk","cream","butter","cheese","yoghurt","yogurt","kefir"],
+  "nut":       ["almond","cashew","walnut","macadamia","pecan","pistachio","hazelnut","peanut","nut butter"],
+  "seed":      ["chia","flax","hemp","sunflower seed","pumpkin seed","sesame"],
+  "herb":      ["basil","coriander","parsley","mint","thyme","rosemary","oregano","dill","turmeric","cinnamon","cumin","paprika"],
+  "frozen":    ["frozen"],
+  "canned":    ["canned","tinned"],
+};
+
+// Helpers
+function lookupFructan(name){
+  if(!name)return null;
+  const n=name.toLowerCase();
+  for(const[k,v]of Object.entries(FRUCTAN_TABLE)){if(n.includes(k))return v;}
+  return null;
+}
+function lookupLactose(name){
+  if(!name)return null;
+  const n=name.toLowerCase();
+  for(const[k,v]of Object.entries(LACTOSE_TABLE)){if(n.includes(k))return v;}
+  return null;
+}
+function lookupOmega(name){
+  if(!name)return null;
+  const n=name.toLowerCase();
+  for(const[k,v]of Object.entries(OMEGA_TABLE)){if(n.includes(k))return v;}
+  return null;
+}
+function inferCategory(name){
+  if(!name)return"other";
+  const n=name.toLowerCase();
+  for(const[cat,kws]of Object.entries(CATEGORY_KEYWORDS)){
+    if(kws.some(k=>n.includes(k)))return cat;
+  }
+  return"other";
+}
+function autoPopulateNutrition(ing){
+  if(!ing.name)return ing;
+  const fr=lookupFructan(ing.name);
+  const la=lookupLactose(ing.name);
+  const om=lookupOmega(ing.name);
+  return{
+    ...ing,
+    high_fructan:   ing.high_fructan!==undefined ? ing.high_fructan : (fr?fr.status==="high":false),
+    fructan_status: fr?.status||"unknown",
+    fructan_note:   fr?.note||"Check FODMAP app manually",
+    lactose:        ing.lactose!==undefined ? ing.lactose : (la?la.lactose:false),
+    lactose_note:   la?.note||"",
+    omega3:         ing.omega3||(om?.omega3||"low"),
+    omega6:         ing.omega6||(om?.omega6||"low"),
+    omega_note:     om?.note||"",
+    category:       (ing.category&&ing.category!=="other") ? ing.category : inferCategory(ing.name),
+  };
+}
+
+// ═══════════════════════════════════════════════════
+// v9.3 — MICRO-ADJUSTMENT ENGINE
+// Returns highest-priority contextual nudge object or null
+// ═══════════════════════════════════════════════════
+function getMicroAdjustmentNudge(){
+  const gate = S.gate||"green";
+  const now  = new Date();
+  const h    = now.getHours();
+  const nowMins = h*60 + now.getMinutes();
+  const bb   = S.ci?.battery ?? 50;
+  const temp = S.weather?.temperature_2m_max ?? 0;
+  const dismissed = S.micro_adj_dismissed||{};
+  const ortho = (S.ci?.symptoms||[]).some(s=>/dizz|orthostatic/i.test(s));
+  const log = S.activity_log||[];
+
+  // Parse a logged time string "HH:MM" to minutes since midnight
+  const toMins = t => { if(!t)return-999; const[a,b]=t.split(":").map(Number); return a*60+b; };
+
+  const waterLogged = log.some(e=>/water|hydrat/i.test(e.task));
+  const hasEaten    = S.ci?.eaten_yet==="Yes";
+  const mealLogs    = log.filter(e=>/meal|eat|food|lunch|dinner|breakfast|snack/i.test(e.task));
+  const lastMealMins = mealLogs.length ? nowMins - toMins(mealLogs[mealLogs.length-1].time) : 999;
+  const taskLogs    = log.filter(e=>(e.cost||0)>0);
+  const lastTaskMins = taskLogs.length ? nowMins - toMins(taskLogs[taskLogs.length-1].time) : 999;
+
+  // Upcoming event within 2 hours
+  const upcomingEvent = (EVENTS||[]).find(ev=>{
+    if(ev.date!==todayStr()||!ev.start_time)return false;
+    const[eh,em]=ev.start_time.split(":").map(Number);
+    const diff=(eh*60+em)-nowMins;
+    return diff>0&&diff<=120;
+  });
+
+  const ok = k => !dismissed[todayStr()+"_"+k]; // not dismissed today
+  const yr = gate==="yellow"||gate==="red";
+  const r  = gate==="red";
+
+  // Priority-ordered list — first match wins
+  const checks = [
+    // Pre-event radical rest (Yellow/Red, event ≤2h away)
+    { k:"pre_event_rest", show: yr && !!upcomingEvent && ok("pre_event_rest"),
+      icon:"🛋", text:`Rest before ${upcomingEvent?.title||"your next event"} — lie down now while you still have time.` },
+
+    // Morning hydration (all gates, before noon, water not yet logged)
+    { k:"morning_hydration", show: !waterLogged && h<12 && ok("morning_hydration"),
+      icon:"💧", text: yr
+        ? "Have you had water yet? Electrolytes help more than plain water on hard days — miso broth, a pinch of salt, or an electrolyte sachet."
+        : "Have you had water yet this morning?" },
+
+    // Paced breathing (Yellow/Red, morning)
+    { k:"paced_breathing", show: yr && h<11 && ok("paced_breathing"),
+      icon:"🌬", text:"A 2-minute breathing practice before anything else — 4 counts in, 6–8 out. Helps offset overnight stress carry-over." },
+
+    // Compression garments (Yellow/Red, morning, OI symptoms present)
+    { k:"compression", show: yr && h<11 && ortho && ok("compression"),
+      icon:"🧦", text:"Compression socks on before your first upright activity — standard OI management." },
+
+    // Eating before hunger (Yellow/Red: 3h, Green: 4h)
+    { k:"eat_soon", show: ok("eat_soon") && (
+        (yr  && (lastMealMins>=180 || (!hasEaten && h>9))) ||
+        (!yr && lastMealMins>=240) ),
+      icon:"🍽", text: r
+        ? "Time to eat — no-prep is fine. Eating before hunger avoids an activation spike your nervous system doesn't need right now."
+        : "Might be time to eat — food before hunger keeps things calmer." },
+
+    // Lie down after task (Yellow/Red, task logged recently)
+    { k:"lie_down", show: yr && taskLogs.length>0 && lastTaskMins<=10 && ok("lie_down"),
+      icon:"🛋", text: r
+        ? "A 15–20 minute lie-down before your next task — flat is better than semi-reclined for OI. It restores blood flow."
+        : "Worth a 10-minute horizontal rest after that." },
+
+    // Posture (Yellow/Red, OI symptoms)
+    { k:"posture", show: yr && ortho && ok("posture"),
+      icon:"🪑", text:"Can this be done seated or lying? Every minute upright when you don't need to be adds haemodynamic strain." },
+
+    // Cool cloth (Yellow/Red)
+    { k:"cool_cloth", show: yr && ok("cool_cloth"),
+      icon:"🧊", text:"A cool cloth on your forehead or cheeks activates your parasympathetic nervous system — immediate calming effect. Apply, then lie down." },
+
+    // Temperature (warm day + Yellow/Red)
+    { k:"temperature", show: yr && temp>24 && ok("temperature"),
+      icon:"🌡", text:"It is warm today — is your rest space cool? A fan is better than cold aircon. Cool the room before lying down." },
+
+    // Sensory load (Yellow/Red, afternoon)
+    { k:"sensory_load", show: yr && h>=14 && ok("sensory_load"),
+      icon:"🔇", text:"Before you rest: lights dimmed? Noise reduced? Screen off? Full rest in ME/CFS needs minimal sensory input." },
+
+    // Mid-afternoon electrolytes (Yellow/Red, 2–4pm)
+    { k:"afternoon_elec", show: yr && h>=14 && h<=16 && ok("afternoon_elec"),
+      icon:"⚡", text:"Mid-afternoon electrolyte top-up — OI symptoms accumulate as the day goes on. Miso broth, electrolyte sachet, or salted water." },
+
+    // No-prep food on Red (every ~2.5h)
+    { k:"noprepfood", show: r && lastMealMins>=150 && ok("noprepfood"),
+      icon:"🥜", text:"Time for no-prep food — peanut butter, rice crackers, anything reachable from where you are. You don't need to stand up." },
+  ];
+
+  for(const chk of checks){
+    if(chk.show) return {key:chk.k, icon:chk.icon, text:chk.text};
+  }
+  return null;
+}
+
 
 const STANDING_TASKS = ["Shower","Getting dressed","Meal prep — light","Meal prep — medium","Meal prep — heavy","Laundry","Short walk outdoors","Grocery shopping — click and collect"];
 
@@ -655,6 +946,12 @@ let S={
   show_log_past_sheet:false,
   // v9.0 — recovery tracking
   recovery_prompts_dismissed:{},
+  // v9.3
+  micro_adj_dismissed:{},    // {todayStr_key: true} — dismissed for the day
+  audit_search:"",           // live filter text for audit view
+  ing_expiry_type:"best_before", // expiry entry mode for ingredient sheet
+  meal_mood:null,            // mood chip selection for prompt tab
+  goto_meals:[],             // [{id,name,eu,notes}] — persisted in localStorage
 };
 
 // ═══════════════════════════════════════════════════
@@ -662,6 +959,8 @@ let S={
 // ═══════════════════════════════════════════════════
 async function init(){
   S.screen="loading"; render();
+  // v9.3: load persisted go-to meals
+  try{S.goto_meals=JSON.parse(localStorage.getItem("pac_goto_meals")||"[]");}catch(e){S.goto_meals=[];}
   // Fetch weather (non-blocking)
   fetchWeather().catch(()=>{});
   try{
@@ -2411,6 +2710,7 @@ function renderPlan(){
 
   return `<div class="section">
     ${todBanner?`<div style="background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:12px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;font-size:.78rem;color:var(--subtle)" class="in"><span>${todBanner.icon}</span><span style="color:${todBanner.col}">${todBanner.msg}</span></div>`:""}
+    ${renderMicroAdjCard()}
     ${overexertion==="red"?`<div class="overexertion-banner in" style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25)"><span>🔴</span><div><span style="font-size:.8rem;color:var(--red)">EU budget reached — rest now.</span><div style="font-size:.72rem;color:var(--muted);margin-top:2px">Still here. Still tracking. Rest is the task now — micro-actions and water are always available below.</div></div></div>`:""}
     ${overexertion==="amber"?`<div class="overexertion-banner in" style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2)"><span>⚠️</span><span style="font-size:.8rem;color:var(--yellow)">80% of EU budget used — consider stopping for today.</span></div>`:""}
     ${strainFlag?`<div style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;gap:10px" class="in"><span>⚠️</span><div><div style="font-size:.8rem;font-weight:500;color:var(--red);margin-bottom:2px">Accumulated strain detected</div><div style="font-size:.75rem;color:var(--subtle)">3+ consecutive hard days — prioritise rest today even if you feel okay.</div></div></div>`:""}
@@ -3340,56 +3640,62 @@ function renderMeals(){
     }
   }
 
-  // ── AUDIT: location-based spatial view ───────────
+  // ── AUDIT: location-based spatial view (v9.3: search, collapse-all) ──
   if(tab === "audit"){
     const sessionActive = S.audit_session_active;
-    const confirmed = S.audit_session_confirmed||{};
+    const confirmed     = S.audit_session_confirmed||{};
     const confirmedCount = Object.keys(confirmed).length;
+    const auditSearch   = (S.audit_search||"").toLowerCase().trim();
 
-    // Urgency badge helper
-    const urgBadge = (item) => {
+    const urgBadge = item => {
       const t = getUrgencyTier(item);
       if(t==="urgent") return `<span style="font-size:.6rem;color:var(--red);background:rgba(248,113,113,.12);padding:1px 5px;border-radius:4px">urgent</span>`;
       if(t==="soon")   return `<span style="font-size:.6rem;color:var(--orange);background:rgba(251,146,60,.12);padding:1px 5px;border-radius:4px">soon</span>`;
       return "";
     };
+    const expiryBit = item => {
+      if(item.days_to_expiry==null) return "";
+      const t = getUrgencyTier(item);
+      const col = t==="urgent"?"var(--red)":t==="soon"?"var(--orange)":"var(--muted)";
+      return ` · <span style="color:${col}">${item.days_to_expiry}d</span>`;
+    };
 
     const locationSections = locations.map(loc => {
-      const items = INGREDIENT_INVENTORY
-        .filter(i => (i.location||"") === loc)
+      const allItems = INGREDIENT_INVENTORY
+        .filter(i => (i.location||"")=== loc)
         .sort((a,b) => {
-          const ta=getUrgencyTier(a), tb=getUrgencyTier(b);
           const ord={urgent:0,soon:1,normal:2};
-          return (ord[ta]||2)-(ord[tb]||2);
+          return (ord[getUrgencyTier(a)]||2)-(ord[getUrgencyTier(b)]||2);
         });
-      const isExpanded = S.audit_expanded_locations[loc] !== false; // default open
-      const urgentCount = items.filter(i=>getUrgencyTier(i)==="urgent").length;
-      const soonCount   = items.filter(i=>getUrgencyTier(i)==="soon").length;
+      const filtered = auditSearch ? allItems.filter(i=>i.name.toLowerCase().includes(auditSearch)) : allItems;
+      if(auditSearch && filtered.length===0) return ""; // hide empty sections during search
+      const isExpanded = auditSearch ? true : (S.audit_expanded_locations[loc]!==false);
+      const urgentCount = allItems.filter(i=>getUrgencyTier(i)==="urgent").length;
+      const soonCount   = allItems.filter(i=>getUrgencyTier(i)==="soon").length;
+      const display     = auditSearch ? filtered : allItems;
 
       return `<div class="card in" style="margin-bottom:10px;padding:0;overflow:hidden">
         <div class="audit-loc-header" data-loc="${escH(loc)}" style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;cursor:pointer;background:${isExpanded?"var(--bg2)":"var(--bg3)"}">
           <div>
             <span style="font-size:.88rem;font-weight:500">${escH(loc)}</span>
-            <span style="font-size:.72rem;color:var(--muted);margin-left:8px">${items.length} item${items.length!==1?"s":""}</span>
-            ${urgentCount?`<span style="font-size:.65rem;color:var(--red);margin-left:6px">● ${urgentCount} urgent</span>`:""}
-            ${soonCount&&!urgentCount?`<span style="font-size:.65rem;color:var(--orange);margin-left:6px">● ${soonCount} soon</span>`:""}
+            <span style="font-size:.72rem;color:var(--muted);margin-left:8px">${auditSearch ? filtered.length+"/"+allItems.length : allItems.length} item${allItems.length!==1?"s":""}</span>
+            ${urgentCount ? `<span style="font-size:.65rem;color:var(--red);margin-left:6px">● ${urgentCount} urgent</span>` : ""}
+            ${soonCount&&!urgentCount ? `<span style="font-size:.65rem;color:var(--orange);margin-left:6px">● ${soonCount} soon</span>` : ""}
           </div>
           <span style="font-size:.8rem;color:var(--muted)">${isExpanded?"↑":"↓"}</span>
         </div>
         ${isExpanded ? `<div style="padding:0 14px 12px">
-          ${items.length===0
+          ${display.length===0
             ? `<div style="padding:10px 0;font-size:.78rem;color:var(--muted);text-align:center">Nothing stored here</div>`
-            : items.map(item => {
-                const isConfirmed = !!confirmed[item.id];
+            : display.map(item => {
+                const isConf = !!confirmed[item.id];
                 return `<div class="audit-item" data-id="${item.id}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);gap:8px">
                   <div style="flex:1;min-width:0">
-                    <div style="font-size:.82rem;font-weight:500;${isConfirmed?"opacity:.55;text-decoration:line-through":""}">${escH(item.name)} ${urgBadge(item)}</div>
-                    <div style="font-size:.7rem;color:var(--muted);margin-top:1px">${item.quantity||""}${item.days_to_expiry!=null?` · <span style="color:${getUrgencyTier(item)==="urgent"?"var(--red)":getUrgencyTier(item)==="soon"?"var(--orange)":"var(--muted)"}">${item.days_to_expiry}d</span>`:""}</div>
+                    <div style="font-size:.82rem;font-weight:500;${isConf?"opacity:.55;text-decoration:line-through":""}">${escH(item.name)} ${urgBadge(item)}</div>
+                    <div style="font-size:.7rem;color:var(--muted);margin-top:1px">${escH(item.quantity||"")}${expiryBit(item)}</div>
                   </div>
                   <div style="display:flex;gap:4px;flex-shrink:0">
-                    ${sessionActive
-                      ? `<button class="audit-confirm" data-id="${item.id}" style="background:${isConfirmed?"rgba(52,211,153,.2)":"var(--bg3)"};border:1px solid ${isConfirmed?"rgba(52,211,153,.4)":"var(--border)"}!important;color:${isConfirmed?"var(--green)":"var(--muted)"};font-size:.72rem;padding:4px 8px;border-radius:7px;cursor:pointer">${isConfirmed?"✓ here":"confirm"}</button>`
-                      : ""}
+                    ${sessionActive ? `<button class="audit-confirm" data-id="${item.id}" style="background:${isConf?"rgba(52,211,153,.2)":"var(--bg3)"};border:1px solid ${isConf?"rgba(52,211,153,.4)":"var(--border)"}!important;color:${isConf?"var(--green)":"var(--muted)"};font-size:.72rem;padding:4px 8px;border-radius:7px;cursor:pointer">${isConf?"✓ here":"confirm"}</button>` : ""}
                     <button class="btn-ghost ing-edit" data-id="${item.id}" style="font-size:.8rem;padding:4px 7px;color:var(--muted)" title="Edit">✏</button>
                     <button class="btn-ghost ing-delete" data-id="${item.id}" style="font-size:.8rem;padding:4px 7px;color:var(--muted)" title="Delete">×</button>
                   </div>
@@ -3398,33 +3704,48 @@ function renderMeals(){
           }
         </div>` : ""}
       </div>`;
-    });
+    }).filter(Boolean);
 
-    // Items with unknown/missing location
     const unknownItems = INGREDIENT_INVENTORY.filter(i=>!i.location||!locations.includes(i.location));
-    const unknownSection = unknownItems.length ? `<div class="card in" style="margin-bottom:10px;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.03)">
-      <div style="padding:10px 14px;font-size:.8rem;font-weight:500;color:var(--yellow)">⚠ Location unknown (${unknownItems.length})</div>
-      <div style="padding:0 14px 12px">${unknownItems.map(item=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.8rem">
+    const unknownFiltered = auditSearch ? unknownItems.filter(i=>i.name.toLowerCase().includes(auditSearch)) : unknownItems;
+    const unknownSection = unknownFiltered.length ? `<div class="card in" style="margin-bottom:10px;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.03)">
+      <div style="padding:10px 14px;font-size:.8rem;font-weight:500;color:var(--yellow)">⚠ Location unknown (${unknownFiltered.length})</div>
+      <div style="padding:0 14px 12px">${unknownFiltered.map(item=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.8rem">
         <span>${escH(item.name)}</span>
         <button class="btn-ghost ing-edit" data-id="${item.id}" style="font-size:.8rem;padding:3px 7px;color:var(--accent)">assign location</button>
       </div>`).join("")}</div>
     </div>` : "";
 
-    // Session controls
+    // v9.3: search bar
+    const searchBar = `<div style="position:relative;margin-bottom:8px">
+      <input type="search" id="audit-search-input" class="text-in" style="width:100%;font-size:.82rem;padding-left:32px" placeholder="Search all locations…" value="${escH(auditSearch)}"/>
+      <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none">🔍</span>
+      ${auditSearch ? `<button id="audit-search-clear" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem">×</button>` : ""}
+    </div>`;
+    // v9.3: collapse / expand all
+    const collapseBar = `<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+      <button id="btn-expand-all" style="background:none;border:none;color:var(--muted);font-size:.72rem;cursor:pointer;padding:0">Expand all</button>
+      <span style="color:var(--border);font-size:.8rem">·</span>
+      <button id="btn-collapse-all" style="background:none;border:none;color:var(--muted);font-size:.72rem;cursor:pointer;padding:0">Collapse all</button>
+      <span style="flex:1"></span>
+      <span style="font-size:.7rem;color:var(--muted)">${INGREDIENT_INVENTORY.length} items total</span>
+    </div>`;
+
     const sessionControls = sessionActive
-      ? `<div style="display:flex;gap:8px;margin-bottom:14px">
+      ? `<div style="display:flex;gap:8px;margin-bottom:10px">
           <div style="flex:1;background:rgba(52,211,153,.07);border:1px solid rgba(52,211,153,.25);border-radius:10px;padding:8px 12px;font-size:.78rem;color:var(--green)">
             ✓ Audit in progress — ${confirmedCount} confirmed
           </div>
-          <button id="btn-finish-audit" class="btn btn-secondary" style="font-size:.76rem;padding:7px 12px;white-space:nowrap">Finish audit</button>
+          <button id="btn-finish-audit" class="btn btn-secondary" style="font-size:.76rem;padding:7px 12px;white-space:nowrap">Finish</button>
         </div>`
-      : `<div style="display:flex;gap:8px;margin-bottom:14px">
+      : `<div style="display:flex;gap:8px;margin-bottom:10px">
           <button id="btn-start-audit" class="btn btn-secondary" style="flex:1;font-size:.78rem">Start audit session</button>
           <button id="btn-quick-add" class="btn btn-primary" style="flex:1;font-size:.78rem">⚡ Quick-add</button>
           <button id="btn-add-ingredient" class="btn btn-secondary" style="flex:0;padding:7px 12px;font-size:.78rem">+</button>
         </div>`;
 
-    body = sessionControls + locationSections.join("") + unknownSection;
+    body = sessionControls + searchBar + collapseBar + locationSections.join("") + unknownSection;
+  }
   }
 
   // ── COMPONENTS: ready-made items ─────────────────
@@ -3465,15 +3786,64 @@ function renderMeals(){
       `).join("")}`;
   }
 
-  // ── PROMPT: generate meal plan ────────────────────
+  // ── PROMPT: generate meal plan (v9.3) ─────────────
   if(tab === "prompt"){
-    const prompt = S.meal_prompt || generateMealPrompt();
-    if(!S.meal_prompt) S.meal_prompt = prompt;
+    // No-prep list: shelf-stable/canned/frozen items in pantry
+    const noPrepItems = INGREDIENT_INVENTORY
+      .filter(i => ["shelf-stable","canned","frozen"].includes(i.form||""))
+      .slice(0, 8);
 
-    body = `
+    const moodOpts = ["warm","cold","salty","savoury","sweet","light","filling"];
+    const selMood  = S.meal_mood||null;
+    const gotoMeals = S.goto_meals||[];
+    const gateNow   = S.gate||"green";
+
+    const moodBar = `<div class="card in" style="margin-bottom:14px">
+      <h3 style="margin-bottom:8px">What feels right to eat? <span style="font-size:.72rem;color:var(--muted);font-weight:400">optional</span></h3>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${moodOpts.map(m => {
+          const sel = selMood===m;
+          return `<button class="meal-mood-btn tag${sel?" sel":""}" data-mood="${m}" style="padding:5px 12px;font-size:.76rem;border-radius:20px;cursor:pointer;background:${sel?"var(--accent)":"var(--bg3)"};color:${sel?"#fff":"var(--muted)"};border:1px solid ${sel?"var(--accent)":"var(--border)"}!important">${m}</button>`;
+        }).join("")}
+        ${selMood ? `<button id="meal-mood-clear" style="background:none;border:none;color:var(--muted);font-size:.75rem;cursor:pointer;padding:4px 8px">clear</button>` : ""}
+      </div>
+    </div>`;
+
+    const gotoSection = gotoMeals.length
+      ? `<div class="card in" style="margin-bottom:14px${gateNow==="red"?";border-color:rgba(248,113,113,.25);background:rgba(248,113,113,.03)":""}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <h3 style="font-size:.88rem">My reliable meals</h3>
+            <button id="btn-add-goto-meal" style="background:none;border:none;color:var(--accent);font-size:.76rem;cursor:pointer">+ add</button>
+          </div>
+          ${gateNow==="red" ? `<p style="font-size:.72rem;color:var(--muted);margin-bottom:8px">Red day — low-effort defaults, no decision needed.</p>` : ""}
+          ${gotoMeals.map((m,idx) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
+            <div>
+              <div style="font-size:.82rem;font-weight:500">${escH(m.name)}</div>
+              <div style="font-size:.7rem;color:var(--muted)">${m.eu ? m.eu+" EU · " : ""}${escH(m.notes||"")}</div>
+            </div>
+            <button class="goto-meal-remove" data-idx="${idx}" style="background:none;border:none;color:var(--muted);font-size:.9rem;cursor:pointer;padding:4px 8px">×</button>
+          </div>`).join("")}
+        </div>`
+      : `<div class="card in" style="margin-bottom:14px;background:rgba(56,189,248,.03)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div style="font-size:.84rem;font-weight:500">My reliable meals</div>
+              <div style="font-size:.74rem;color:var(--muted);margin-top:3px">Add your go-to options — prioritised on red days.</div>
+            </div>
+            <button id="btn-add-goto-meal" class="btn btn-secondary" style="font-size:.76rem;padding:6px 12px;white-space:nowrap">+ Add</button>
+          </div>
+        </div>`;
+
+    const basePrompt  = S.meal_prompt || generateMealPrompt();
+    if(!S.meal_prompt) S.meal_prompt = basePrompt + (selMood ? `
+
+Mood preference: ${selMood} food today.` : "");
+    const prompt = S.meal_prompt;
+
+    body = moodBar + gotoSection + `
       <div class="card in" style="margin-bottom:14px">
         <h3 style="margin-bottom:8px">Your meal plan prompt</h3>
-        <p style="font-size:.78rem;color:var(--muted);margin-bottom:12px;line-height:1.6">Copy this and paste it into a new Claude.ai conversation. Claude will generate a burst-sequenced meal plan for your kitchen and capacity today.</p>
+        <p style="font-size:.78rem;color:var(--muted);margin-bottom:12px;line-height:1.6">Copy and paste into a new Claude.ai conversation for a burst-sequenced meal plan.</p>
         <div style="background:var(--bg3);border-radius:10px;padding:12px;margin-bottom:12px;max-height:260px;overflow-y:auto;font-size:.72rem;color:var(--subtle);line-height:1.6;white-space:pre-wrap;font-family:monospace">${escH(prompt)}</div>
         <div style="display:flex;gap:8px">
           <button id="btn-copy-prompt" class="btn btn-primary" style="flex:1">Copy prompt</button>
@@ -3481,12 +3851,11 @@ function renderMeals(){
         </div>
         <p style="font-size:.68rem;color:var(--muted);margin-top:8px;text-align:center">Regenerates with your current EU budget</p>
       </div>
-      <div class="card in" style="background:rgba(56,189,248,.04)">
-        <h3 style="margin-bottom:8px">After getting your plan</h3>
-        <div style="font-size:.78rem;color:var(--subtle);line-height:1.7">
-          Update your pantry and components as you cook — that way your next prompt will be accurate. The app tracks what is urgent so you never lose track of things going off.
-        </div>
-      </div>`;
+      ${noPrepItems.length ? `<div class="card in" style="margin-bottom:14px;background:rgba(52,211,153,.03)">
+        <h3 style="margin-bottom:8px">No-prep options right now</h3>
+        <p style="font-size:.76rem;color:var(--muted);margin-bottom:8px">From your pantry — no cooking or standing required.</p>
+        ${noPrepItems.map(i=>`<div style="font-size:.8rem;padding:4px 0;border-bottom:1px solid var(--border)">${escH(i.name)}<span style="color:var(--muted);font-size:.7rem"> · ${escH(i.location||"")}</span></div>`).join("")}
+      </div>` : ""}`;
   }
 
   return `<div class="section">
@@ -3502,46 +3871,129 @@ function renderMeals(){
 
 
 function renderIngredientSheet(){
-  const ing = S.ingredient_edit || {};
+  const ing    = S.ingredient_edit||{};
   const isEdit = !!ing.id;
-  const cats = ["protein","grain","vegetable","sauce","dairy","condiment","sweet","other"];
-  const forms = ["fresh","frozen","dried","canned","cooked","shelf-stable"];
-  const locs = getPantryLocations();
-  const omegas = ["high","balanced","low","unknown"];
+  const cats   = ["protein","grain","vegetable","fruit","nut","seed","condiment","herb","dairy","frozen","canned","sauce","sweet","other"];
+  const forms  = ["fresh","frozen","dried","canned","cooked","shelf-stable"];
+  const locs   = getPantryLocations();
+  const exType = S.ing_expiry_type||"best_before";
+
+  // Auto-lookup from current name
+  const fr  = lookupFructan(ing.name||"");
+  const la  = lookupLactose(ing.name||"");
+  const om  = lookupOmega(ing.name||"");
+  const cat = (ing.category&&ing.category!=="other") ? ing.category : inferCategory(ing.name||"");
+
+  const urgencies = ["urgent","soon","normal"];
+  const exTypeLabels = {best_before:"Best before",lay_date:"Lay date",opened_on:"Opened on",cook_date:"Made on"};
+  const exTypeHints  = {
+    best_before:"Date on the package — days remaining computed automatically.",
+    lay_date:   "Eggs: ~5 weeks from lay. Other produce: ~7 days.",
+    opened_on:  "Safe-open window by category (e.g. jars ~90 days, coconut cream ~3 days).",
+    cook_date:  "Cooked items: ~3 days default.",
+  };
+  const currentDate = ing.origin_date||ing.expiry_date||"";
 
   return `<div class="sheet-overlay" id="ing-sheet-overlay">
-    <div class="sheet">
+    <div class="sheet" style="max-height:92vh;overflow-y:auto">
       <div class="sheet-handle"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <h2 style="font-size:1rem">${isEdit?"Edit":"Add"} ingredient</h2>
         <button id="close-ing-sheet" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
       </div>
-      <div class="field"><label class="field-label">Name</label>
-        <input type="text" id="ing-name" class="text-in" style="width:100%" value="${ing.name||""}" placeholder="e.g. Firm tofu"/></div>
+
+      <div class="field">
+        <label class="field-label">Name</label>
+        <input type="text" id="ing-name" class="text-in" style="width:100%" value="${escH(ing.name||"")}" placeholder="e.g. Firm tofu"/>
+      </div>
+
       <div style="display:flex;gap:10px">
-        <div class="field" style="flex:1"><label class="field-label">Category</label>
-          <select id="ing-cat" class="text-in" style="width:100%">${cats.map(c=>`<option value="${c}"${ing.category===c?" selected":""}>${c}</option>`).join("")}</select></div>
-        <div class="field" style="flex:1"><label class="field-label">Form</label>
-          <select id="ing-form" class="text-in" style="width:100%">${forms.map(f=>`<option value="${f}"${ing.form===f?" selected":""}>${f}</option>`).join("")}</select></div>
+        <div class="field" style="flex:1">
+          <label class="field-label">Category <span style="color:var(--muted);font-weight:400;font-size:.68rem">auto-detected</span></label>
+          <select id="ing-cat" class="text-in" style="width:100%">
+            ${cats.map(c=>`<option value="${c}"${(ing.category||cat)===c?" selected":""}>${c}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field" style="flex:1">
+          <label class="field-label">Form</label>
+          <select id="ing-form" class="text-in" style="width:100%">
+            ${forms.map(f=>`<option value="${f}"${ing.form===f?" selected":""}>${f}</option>`).join("")}
+          </select>
+        </div>
       </div>
+
       <div style="display:flex;gap:10px">
-        <div class="field" style="flex:1"><label class="field-label">Quantity</label>
-          <input type="text" id="ing-qty" class="text-in" style="width:100%" value="${ing.quantity||""}" placeholder="e.g. 400g"/></div>
-        <div class="field" style="flex:1"><label class="field-label">Location</label>
-          <select id="ing-loc" class="text-in" style="width:100%">${locs.map(l=>`<option value="${l}"${ing.location===l?" selected":""}>${l}</option>`).join("")}</select></div>
+        <div class="field" style="flex:1">
+          <label class="field-label">Quantity</label>
+          <input type="text" id="ing-qty" class="text-in" style="width:100%" value="${escH(ing.quantity||"")}" placeholder="e.g. 400g"/>
+        </div>
+        <div class="field" style="flex:1">
+          <label class="field-label">Location</label>
+          <select id="ing-loc" class="text-in" style="width:100%">
+            ${locs.map(l=>`<option value="${l}"${ing.location===l?" selected":""}>${l}</option>`).join("")}
+          </select>
+        </div>
       </div>
-      <div style="display:flex;gap:10px">
-        <div class="field" style="flex:1"><label class="field-label">Days to expiry</label>
-          <input type="number" id="ing-expiry" class="text-in" style="width:100%" value="${ing.expiry_date ? Math.max(0,daysFromExpiryDate(ing.expiry_date)) : ""}" placeholder="blank if shelf-stable"/></div>
-        <div class="field" style="flex:1"><label class="field-label">Omega ratio</label>
-          <select id="ing-omega" class="text-in" style="width:100%">${omegas.map(o=>`<option value="${o}"${ing.omega_ratio===o?" selected":""}>${o}</option>`).join("")}</select></div>
+
+      <div class="field">
+        <label class="field-label">Urgency</label>
+        <div style="display:flex;gap:6px">
+          ${urgencies.map(u=>{
+            const sel=(ing.urgency||"normal")===u;
+            const bg=sel?(u==="urgent"?"rgba(248,113,113,.12)":u==="soon"?"rgba(251,146,60,.1)":"rgba(52,211,153,.1)"):"var(--bg3)";
+            const brd=sel?(u==="urgent"?"rgba(248,113,113,.4)":u==="soon"?"rgba(251,146,60,.3)":"rgba(52,211,153,.3)"):"var(--border)";
+            const col=sel?(u==="urgent"?"var(--red)":u==="soon"?"var(--orange)":"var(--green)"):"var(--muted)";
+            return `<button class="ing-urg-btn${sel?" sel":""}" data-urg="${u}" style="padding:5px 14px;font-size:.76rem;border-radius:20px;cursor:pointer;background:${bg};border:1px solid ${brd}!important;color:${col}">${u}</button>`;
+          }).join("")}
+        </div>
       </div>
-      <div style="display:flex;gap:16px;margin-bottom:14px;align-items:center">
-        <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--subtle);cursor:pointer">
-          <input type="checkbox" id="ing-fructan" ${ing.high_fructan?"checked":""} style="width:16px;height:16px"/>
-          High fructan ⚠
-        </label>
+
+      <div class="field">
+        <label class="field-label">Expiry / origin <span style="color:var(--muted);font-weight:400;font-size:.68rem">— no mental maths needed</span></label>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px">
+          ${Object.entries(exTypeLabels).map(([t,label])=>{
+            const sel=exType===t;
+            return `<button class="expiry-type-btn${sel?" sel":""}" data-t="${t}" style="padding:4px 10px;font-size:.72rem;border-radius:20px;cursor:pointer;background:${sel?"var(--accent)":"var(--bg3)"};color:${sel?"#fff":"var(--muted)"};border:1px solid ${sel?"var(--accent)":"var(--border)"}!important">${label}</button>`;
+          }).join("")}
+        </div>
+        <input type="date" id="ing-origin-date" class="text-in" style="width:100%;font-size:.82rem" value="${escH(currentDate)}"/>
+        <p style="font-size:.68rem;color:var(--muted);margin-top:4px">${exTypeHints[exType]}</p>
+        ${ing.days_to_expiry!=null ? `<p style="font-size:.72rem;color:${getUrgencyTier(ing)==="urgent"?"var(--red)":getUrgencyTier(ing)==="soon"?"var(--orange)":"var(--muted)"};margin-top:2px">${ing.days_to_expiry} days remaining</p>` : ""}
       </div>
+
+      <div style="background:var(--bg3);border-radius:10px;padding:10px 12px;margin-bottom:14px">
+        <div style="font-size:.72rem;font-weight:500;color:var(--muted);margin-bottom:8px">
+          Nutritional profile <span style="font-weight:400">— auto-populated from name, tap to override</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="flex:1">
+            <label style="font-size:.68rem;color:var(--muted);display:block;margin-bottom:3px">Omega-3</label>
+            <select id="ing-omega3" class="text-in" style="width:100%;font-size:.78rem">
+              ${["high","medium","low"].map(v=>`<option value="${v}"${(ing.omega3||om?.omega3||"low")===v?" selected":""}>${v}</option>`).join("")}
+            </select>
+          </div>
+          <div style="flex:1">
+            <label style="font-size:.68rem;color:var(--muted);display:block;margin-bottom:3px">Omega-6</label>
+            <select id="ing-omega6" class="text-in" style="width:100%;font-size:.78rem">
+              ${["high","medium","low"].map(v=>`<option value="${v}"${(ing.omega6||om?.omega6||"low")===v?" selected":""}>${v}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        ${om ? `<p style="font-size:.67rem;color:var(--muted);margin-bottom:8px">${escH(om.note)}</p>` : ""}
+        <div style="display:flex;gap:14px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--subtle);cursor:pointer">
+            <input type="checkbox" id="ing-fructan" ${(ing.high_fructan!==undefined?ing.high_fructan:(fr?.status==="high"))?"checked":""} style="width:15px;height:15px"/>
+            High fructan
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--subtle);cursor:pointer">
+            <input type="checkbox" id="ing-lactose" ${(ing.lactose!==undefined?ing.lactose:(la?.lactose||false))?"checked":""} style="width:15px;height:15px"/>
+            Contains lactose
+          </label>
+        </div>
+        ${fr ? `<p style="font-size:.67rem;color:${fr.status==="high"?"var(--red)":fr.status==="threshold"?"var(--orange)":"var(--green)"};margin-top:5px">🌿 ${escH(fr.note)}</p>` : ""}
+        ${la ? `<p style="font-size:.67rem;color:${la.lactose?"var(--orange)":"var(--muted)"};margin-top:3px">🥛 ${escH(la.note)}</p>` : ""}
+      </div>
+
       <button class="btn btn-primary" id="save-ingredient" style="width:100%">${isEdit?"Save changes":"Add ingredient"}</button>
     </div>
   </div>`;
@@ -4198,6 +4650,18 @@ function renderCloseout(){
 }
 
 // ── v9.0 "WHAT NOW?" CARD ─────────────────────────
+// ── v9.3 MICRO-ADJUSTMENT NUDGE CARD ─────────────
+function renderMicroAdjCard(){
+  if(!S.ci || S.ci.energy===undefined) return ""; // no check-in yet today
+  const nudge = getMicroAdjustmentNudge();
+  if(!nudge) return "";
+  return `<div class="in" style="display:flex;align-items:flex-start;gap:10px;background:rgba(99,102,241,.06);border:1px solid rgba(99,102,241,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:1.3rem;flex-shrink:0;line-height:1.2">${nudge.icon}</div>
+    <div style="flex:1;font-size:.82rem;color:var(--subtle);line-height:1.6">${nudge.text}</div>
+    <button class="micro-adj-dismiss" data-key="${nudge.key}" style="background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;flex-shrink:0;padding:0 4px;align-self:flex-start" title="Dismiss for today">×</button>
+  </div>`;
+}
+
 function renderWhatNowCard(){
   if(!S.show_what_now)return"";
   const s=whatNowSuggestion();
@@ -4589,30 +5053,62 @@ function bindMain(){
   document.getElementById("close-ing-sheet")?.addEventListener("click",()=>{S.show_add_ingredient=false;S.ingredient_edit=null;render();});
   document.getElementById("ing-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="ing-sheet-overlay"){S.show_add_ingredient=false;S.ingredient_edit=null;render();}});
   document.getElementById("save-ingredient")?.addEventListener("click",async()=>{
-    const name=document.getElementById("ing-name")?.value?.trim();
+    const name = document.getElementById("ing-name")?.value?.trim();
     if(!name){alert("Name required.");return;}
-    const expStr=document.getElementById("ing-expiry")?.value;
-    const expiry_date = expStr ? expiryDateFromDays(expStr) : (S.ingredient_edit?.expiry_date||null);
-    const ing={
-      id: S.ingredient_edit?.id || mealDataId(),
+
+    // v9.3: date-of-origin expiry logic
+    const originDateStr = document.getElementById("ing-origin-date")?.value||"";
+    const exType = S.ing_expiry_type||"best_before";
+    let expiry_date = null, days_to_expiry = null;
+    if(originDateStr){
+      const base = new Date(originDateStr);
+      if(!isNaN(base)){
+        const d = new Date(base);
+        if(exType==="best_before"){
+          expiry_date = originDateStr;
+        } else if(exType==="lay_date"){
+          d.setDate(d.getDate()+35); expiry_date=d.toISOString().split("T")[0];
+        } else if(exType==="opened_on"){
+          d.setDate(d.getDate()+90); expiry_date=d.toISOString().split("T")[0];
+        } else if(exType==="cook_date"){
+          d.setDate(d.getDate()+3);  expiry_date=d.toISOString().split("T")[0];
+        }
+        if(expiry_date) days_to_expiry = daysFromExpiryDate(expiry_date);
+      }
+    } else {
+      expiry_date     = S.ingredient_edit?.expiry_date||null;
+      days_to_expiry  = expiry_date ? daysFromExpiryDate(expiry_date) : null;
+    }
+
+    // v9.3: urgency from button selection
+    const urgBtn = document.querySelector(".ing-urg-btn.sel");
+    const urgency = urgBtn?.dataset?.urg || ((days_to_expiry!=null&&days_to_expiry<=2)?"urgent":"normal");
+
+    const rawIng = {
+      id:           S.ingredient_edit?.id || mealDataId(),
       name,
-      category: document.getElementById("ing-cat")?.value||"other",
-      form: document.getElementById("ing-form")?.value||"fresh",
-      quantity: document.getElementById("ing-qty")?.value||"",
-      location: document.getElementById("ing-loc")?.value||(getPantryLocations()[0]||""),
-      expiry_date,
-      days_to_expiry: expiry_date ? daysFromExpiryDate(expiry_date) : null,
-      urgency: (expiry_date && daysFromExpiryDate(expiry_date)<=3)?"urgent":"normal",
+      category:     document.getElementById("ing-cat")?.value  || inferCategory(name),
+      form:         document.getElementById("ing-form")?.value || "fresh",
+      quantity:     document.getElementById("ing-qty")?.value  || "",
+      location:     document.getElementById("ing-loc")?.value  || (getPantryLocations()[0]||""),
+      expiry_date, days_to_expiry,
+      origin_date:  originDateStr||null,
+      expiry_type:  exType,
+      urgency,
       high_fructan: document.getElementById("ing-fructan")?.checked||false,
-      omega_ratio: document.getElementById("ing-omega")?.value||"unknown"
+      lactose:      document.getElementById("ing-lactose")?.checked||false,
+      omega3:       document.getElementById("ing-omega3")?.value||"low",
+      omega6:       document.getElementById("ing-omega6")?.value||"low",
     };
+    const ing = autoPopulateNutrition(rawIng);
+
     if(S.ingredient_edit?.id){
-      INGREDIENT_INVENTORY=INGREDIENT_INVENTORY.map(i=>i.id===ing.id?ing:i);
-    }else{
+      INGREDIENT_INVENTORY = INGREDIENT_INVENTORY.map(i=>i.id===ing.id?ing:i);
+    } else {
       INGREDIENT_INVENTORY.push(ing);
     }
     await saveMealData();
-    S.show_add_ingredient=false;S.ingredient_edit=null;render();
+    S.show_add_ingredient=false; S.ingredient_edit=null; S.ing_expiry_type="best_before"; render();
   });
   document.querySelectorAll(".ing-edit").forEach(b=>b.addEventListener("click",()=>{
     S.ingredient_edit=INGREDIENT_INVENTORY.find(i=>i.id===b.dataset.id)||{};
@@ -4795,6 +5291,108 @@ function bindMain(){
     await saveMealData();render();
   });
 
+  // ── v9.3 — Micro-adjustment dismiss ─────────────
+  document.querySelectorAll(".micro-adj-dismiss").forEach(b => b.addEventListener("click", () => {
+    const key = b.dataset.key;
+    if(!S.micro_adj_dismissed) S.micro_adj_dismissed = {};
+    S.micro_adj_dismissed[todayStr()+"_"+key] = true;
+    render();
+  }));
+
+  // ── v9.3 — Audit search ───────────────────────
+  document.getElementById("audit-search-input")?.addEventListener("input", e => {
+    S.audit_search = e.target.value||"";
+    render();
+    // Restore focus + caret position
+    const el = document.getElementById("audit-search-input");
+    if(el){ const len = (S.audit_search||"").length; try{el.setSelectionRange(len,len);}catch(x){} }
+  });
+  document.getElementById("audit-search-clear")?.addEventListener("click", () => {
+    S.audit_search=""; render();
+  });
+
+  // ── v9.3 — Collapse / Expand all ─────────────
+  document.getElementById("btn-expand-all")?.addEventListener("click", () => {
+    getPantryLocations().forEach(l => { S.audit_expanded_locations[l] = true; });
+    render();
+  });
+  document.getElementById("btn-collapse-all")?.addEventListener("click", () => {
+    getPantryLocations().forEach(l => { S.audit_expanded_locations[l] = false; });
+    render();
+  });
+
+  // ── v9.3 — Expiry type buttons ────────────────
+  document.querySelectorAll(".expiry-type-btn").forEach(b => b.addEventListener("click", () => {
+    S.ing_expiry_type = b.dataset.t;
+    render();
+    setTimeout(()=>document.getElementById("ing-origin-date")?.focus(), 50);
+  }));
+
+  // ── v9.3 — Urgency buttons (ingredient sheet) ─
+  document.querySelectorAll(".ing-urg-btn").forEach(b => b.addEventListener("click", () => {
+    document.querySelectorAll(".ing-urg-btn").forEach(x => x.classList.remove("sel"));
+    b.classList.add("sel");
+  }));
+
+  // ── v9.3 — Auto-populate on name blur ─────────
+  document.getElementById("ing-name")?.addEventListener("blur", () => {
+    const name = document.getElementById("ing-name")?.value||"";
+    if(!name) return;
+    // Category
+    const catEl = document.getElementById("ing-cat");
+    if(catEl && catEl.value==="other") catEl.value = inferCategory(name);
+    // Fructan
+    const fr = lookupFructan(name);
+    if(fr){ const el=document.getElementById("ing-fructan"); if(el&&!el.dataset.manualSet) el.checked=(fr.status==="high"); }
+    // Lactose
+    const la = lookupLactose(name);
+    if(la){ const el=document.getElementById("ing-lactose"); if(el&&!el.dataset.manualSet) el.checked=la.lactose; }
+    // Omega
+    const om = lookupOmega(name);
+    if(om){
+      const o3=document.getElementById("ing-omega3"); if(o3) o3.value=om.omega3;
+      const o6=document.getElementById("ing-omega6"); if(o6) o6.value=om.omega6;
+    }
+  });
+  document.getElementById("ing-fructan")?.addEventListener("change", e => { e.target.dataset.manualSet=true; });
+  document.getElementById("ing-lactose")?.addEventListener("change", e => { e.target.dataset.manualSet=true; });
+
+  // ── v9.3 — Mood selector ──────────────────────
+  document.querySelectorAll(".meal-mood-btn").forEach(b => b.addEventListener("click", () => {
+    S.meal_mood = S.meal_mood===b.dataset.mood ? null : b.dataset.mood;
+    S.meal_prompt = null; render();
+  }));
+  document.getElementById("meal-mood-clear")?.addEventListener("click", () => {
+    S.meal_mood=null; S.meal_prompt=null; render();
+  });
+
+  // ── v9.3 — Go-to meals ────────────────────────
+  document.getElementById("btn-add-goto-meal")?.addEventListener("click", () => {
+    const name = prompt("Meal name:");
+    if(!name) return;
+    const euStr = prompt("EU cost (optional — press Enter to skip):")||"0";
+    const eu    = parseFloat(euStr)||0;
+    const notes = prompt("Short description (optional):")||"";
+    if(!S.goto_meals) S.goto_meals=[];
+    S.goto_meals.push({id:mealDataId(), name, eu, notes});
+    try{localStorage.setItem("pac_goto_meals", JSON.stringify(S.goto_meals));}catch(e){}
+    render();
+  });
+  document.querySelectorAll(".goto-meal-remove").forEach(b => b.addEventListener("click", () => {
+    const idx = Number(b.dataset.idx);
+    S.goto_meals = (S.goto_meals||[]).filter((_,i)=>i!==idx);
+    try{localStorage.setItem("pac_goto_meals", JSON.stringify(S.goto_meals));}catch(e){}
+    render();
+  }));
+
+  // ── v9.3 — Regen prompt with mood ─────────────
+  document.getElementById("btn-regen-prompt")?.addEventListener("click", () => {
+    S.meal_prompt = generateMealPrompt() + (S.meal_mood ? `
+
+Mood preference: ${S.meal_mood} food today.` : "");
+    render();
+  });
+
   // ── v9.2 — Audit session bindings ────────────────
   document.getElementById("btn-start-audit")?.addEventListener("click",()=>{
     S.audit_session_active=true;
@@ -4842,7 +5440,6 @@ function bindMain(){
       if(btn){btn.textContent="Copied!";setTimeout(()=>{if(btn)btn.textContent="Copy prompt";},2000);}
     }).catch(()=>{});
   });
-  document.getElementById("btn-regen-prompt")?.addEventListener("click",()=>{S.meal_prompt=generateMealPrompt();render();});
 
   // Task logging
   // v6.4 — task tier expand/collapse
