@@ -3651,8 +3651,8 @@ function estimatePhaseForDate(dateStr){
 // ── EVENTS TAB (v4.3 + v4.4) ─────────────────────
 function renderEvents(){
   const today=todayStr();
-  const upcoming=EVENTS.filter(e=>e.date>=today).sort((a,b)=>a.date.localeCompare(b.date));
-  const past=EVENTS.filter(e=>e.date<today).sort((a,b)=>b.date.localeCompare(a.date));
+  const upcoming=EVENTS.filter(e=>e.date>=today).sort((a,b)=>a.date.localeCompare(b.date)||((a.start_time||"99:99").localeCompare(b.start_time||"99:99")));
+  const past=EVENTS.filter(e=>e.date<today).sort((a,b)=>b.date.localeCompare(a.date)||((a.start_time||"99:99").localeCompare(b.start_time||"99:99")));
 
   // Group upcoming by week
   function weekGroup(evs){
