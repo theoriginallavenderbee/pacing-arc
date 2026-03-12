@@ -83,13 +83,21 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 .card-restorative{background:rgba(167,139,250,.06);border:1px solid rgba(167,139,250,.25);border-radius:12px;padding:12px 14px}
 .restorative-tag{display:inline-block;font-size:.6rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:rgba(167,139,250,.15);color:#a78bfa;margin-left:5px}
 .return-pill{font-size:.65rem;color:#a78bfa;background:rgba(167,139,250,.1);border-radius:6px;padding:2px 7px;white-space:nowrap}
+
+/* v10.0 — Visual Pacing Canvas */
+.canvas-block { transition: opacity .15s, border-color .15s; }
+.canvas-block.drag-over { border-color: var(--accent) !important; border-style: dashed !important; }
+.canvas-week-day.drag-over { border-color: var(--green) !important; background: rgba(52,211,153,.05) !important; }
+.pool-item:hover { opacity: .85; }
+.canvas-block:hover { filter: brightness(1.05); }
+
 </style>
 </head>
 <body>
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════
-// PACING ARC v9.3
+// PACING ARC v10.0
 // v4.1: Sleep score EU, weighted gate, orthostatic costs
 // v4.2: Weather, rest timer, overexertion, time-of-day
 // v4.3: Cycle calc, banking planner, events, forecast
@@ -114,6 +122,10 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 // v9.3: micro-adjustment layer, audit search + collapse-all, date-of-origin expiry,
 //        urgency field in sheet, omega dual tracking, fructan/lactose lookup tables,
 //        no-prep food list, go-to meals, mood pre-prompt, category auto-defaults
+// v10.0: Visual Pacing Canvas — Day View (EU 3-part display, layer blocks, drag-within-day,
+//        unscheduled pool, gate-aware) + Week View (7-day columns, net balance, phase),
+//        5-layer system (Rock/Pebble/Sand/Gap/Water), user-configurable layer colours,
+//        appointment-adjacent tethering, restorative practice deposits
 // ═══════════════════════════════════════════════════
 
 const SB_URL = "https://wtdymvqlugmfwemqyvde.supabase.co";
@@ -952,6 +964,23 @@ let S={
   ing_expiry_type:"best_before", // expiry entry mode for ingredient sheet
   meal_mood:null,            // mood chip selection for prompt tab
   goto_meals:[],             // [{id,name,eu,notes}] — persisted in localStorage
+  // v10.0 — Visual Pacing Canvas
+  canvas_view:"day",         // "day" | "week"
+  canvas_date:null,          // null = today; YYYY-MM-DD for navigated days
+  canvas_blocks:[],          // [{id,title,layer,eu_cost,return_eu,return_note,start_time,duration_mins,tethered,restorative,event_id,done}]
+  canvas_drag_id:null,       // id of block being dragged
+  canvas_drag_over:null,     // slot key being dragged over
+  canvas_week_drag:null,     // {block_id, from_date} for cross-day drag
+  canvas_week_drag_over:null,// date string being hovered over in week drag
+  canvas_colour_setup_done:false, // true once user has confirmed colours
+  canvas_colour_setup_open:false, // colour setup sheet open
+  layer_colours:{            // user-configurable; defaults set on first open
+    rock:"#a78bfa",
+    pebble:"#34d399",
+    sand:"#fb923c",
+    gap:"#93c5fd",
+    water:"#6ee7b7",
+  },
 };
 
 // ═══════════════════════════════════════════════════
@@ -961,6 +990,18 @@ async function init(){
   S.screen="loading"; render();
   // v9.3: load persisted go-to meals
   try{S.goto_meals=JSON.parse(localStorage.getItem("pac_goto_meals")||"[]");}catch(e){S.goto_meals=[];}
+  // v10.0: load canvas layer colours
+  loadLayerColours();
+  // v10.0: canvas localStorage fallback (for when Supabase not yet loaded)
+  if(!S.canvas_blocks||S.canvas_blocks.length===0){
+    try{
+      const saved=JSON.parse(localStorage.getItem("pac_canvas_"+todayStr())||"null");
+      if(saved&&Array.isArray(saved.blocks)&&saved.blocks.length){
+        S.canvas_blocks=saved.blocks;
+        if(saved.date)S.canvas_date=saved.date;
+      }
+    }catch(_){}
+  }
   // Fetch weather (non-blocking)
   fetchWeather().catch(()=>{});
   try{
@@ -999,6 +1040,11 @@ async function init(){
         if(today.midday_done)S.midday_done=true;
         if(today.in_crash!==undefined)S.in_crash=today.in_crash;
         if(today.evening_done)S.evening_done=true;
+        // v10.0: restore canvas blocks from Supabase (cross-device sync)
+        if(today.canvas_blocks&&Array.isArray(today.canvas_blocks)&&today.canvas_blocks.length){
+          S.canvas_blocks=today.canvas_blocks;
+        }
+        if(today.canvas_date)S.canvas_date=today.canvas_date;
         // Restore crash persistence from carry-forward
         if(!S.in_crash&&today.in_crash)S.in_crash=today.in_crash;
         // Always recalculate gate and EU from the stored check-in using the
@@ -1081,9 +1127,29 @@ async function init(){
   });
 }
 
+async function saveCanvasBlocks(){
+  // Save canvas blocks to Supabase so they sync across phone/laptop
+  try{
+    await sbSaveToday({
+      gate:S.gate, eu_budget:S.eu_budget, eu_used:S.eu_used,
+      plan:S.plan||null, checkin:S.ci||null,
+      midday_done:S.midday_done, in_crash:S.in_crash, evening_done:S.evening_done,
+      canvas_blocks:(S.canvas_blocks&&S.canvas_blocks.length?S.canvas_blocks:null)||null,
+      canvas_date:S.canvas_date||null,
+    });
+    SYNC_STATUS="ok";
+  }catch(e){
+    SYNC_STATUS="off";
+    // Fallback: persist to localStorage so not lost on page reload
+    try{localStorage.setItem("pac_canvas_"+todayStr(),JSON.stringify({blocks:S.canvas_blocks,date:S.canvas_date}));}catch(_){}
+    console.warn("[PacingArc] saveCanvasBlocks failed:",e.message);
+  }
+  updateSyncDot();
+}
+
 async function syncToday(){
   try{
-    await sbSaveToday({gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,plan:S.plan||null,checkin:S.ci||null,midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done});
+    await sbSaveToday({gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,plan:S.plan||null,checkin:S.ci||null,midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done,canvas_blocks:(S.canvas_blocks&&S.canvas_blocks.length?S.canvas_blocks:null)||null,canvas_date:S.canvas_date||null});
     SYNC_STATUS="ok";
   }catch(e){SYNC_STATUS="off";console.warn("[PacingArc] syncToday failed:",e.message);}
   updateSyncDot();
@@ -3120,52 +3186,450 @@ function renderTasks(){
 }
 
 // ── WEEK PLANNING VIEW (v6.8) ─────────────────────
+// ═══════════════════════════════════════════════════
+// v10.0 — VISUAL PACING CANVAS ENGINE
+// ═══════════════════════════════════════════════════
+
+// Layer definitions
+const LAYERS = {
+  rock:   {label:"Rock",   desc:"Fixed — appointments & restorative practices",   drag:"warn",  committedEu:true},
+  pebble: {label:"Pebble", desc:"Flexible — reducible, moveable tasks",            drag:"free",  committedEu:false},
+  sand:   {label:"Sand",   desc:"Necessities — shower, meals, meds, dressing",    drag:"free",  committedEu:true},
+  gap:    {label:"Gap",    desc:"Protected rest — minimum 30 min, not deletable", drag:"resize",committedEu:false},
+  water:  {label:"Water",  desc:"Unplanned — retrospective annotation only",      drag:"none",  committedEu:false},
+};
+
+// Which tasks are Sand (committed EU necessities)
+const SAND_TASK_NAMES = new Set([
+  "Shower","Getting dressed","Meal prep — light","Meal prep — medium",
+  "Meal prep — heavy","Medication prep","Dishwashing block",
+]);
+
+// Default gap block duration (minutes)
+const GAP_DEFAULT_MINS = 45;
+
+// Load/save layer colours from localStorage
+function loadLayerColours(){
+  try{
+    const stored=JSON.parse(localStorage.getItem("pac_layer_colours")||"null");
+    if(stored&&stored.rock&&stored.pebble&&stored.sand&&stored.gap&&stored.water){
+      S.layer_colours=stored;
+      S.canvas_colour_setup_done=true;
+    }
+  }catch(e){}
+}
+function saveLayerColours(){
+  try{localStorage.setItem("pac_layer_colours",JSON.stringify(S.layer_colours));}catch(e){}
+}
+
+// Get colour for a layer with alpha
+function layerCol(layer, alpha=1){
+  const hex=S.layer_colours[layer]||(layer==="rock"?"#a78bfa":layer==="pebble"?"#34d399":layer==="sand"?"#fb923c":layer==="gap"?"#93c5fd":"#6ee7b7");
+  // Convert hex to rgb for alpha support
+  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  return alpha<1 ? `rgba(${r},${g},${b},${alpha})` : hex;
+}
+
+// Build canvas blocks for a given date from EVENTS + defaults
+function buildCanvasBlocksForDate(dateStr){
+  const isToday = dateStr===todayStr();
+  const gate = isToday ? (S.gate||"green") : "green";
+  const blocks=[];
+
+  // 1. Rock blocks: scheduled EVENTS on this date
+  const dayEvents = EVENTS.filter(e=>e.date===dateStr).sort((a,b)=>(a.start_time||"99:99").localeCompare(b.start_time||"99:99"));
+  dayEvents.forEach(ev=>{
+    const isRestorative = RESTORATIVE_PRACTICES.some(p=>p.name===ev.title||p.id===ev.template_id);
+    const rp = isRestorative ? RESTORATIVE_PRACTICES.find(p=>p.name===ev.title||p.id===ev.template_id) : null;
+    blocks.push({
+      id:"ev_"+ev.id,
+      event_id:ev.id,
+      title:ev.title,
+      layer: isRestorative?"rock":"rock",
+      eu_cost: ev.eu_cost||0,
+      return_eu: rp?.return_eu||0,
+      return_note: rp?.return_note||"",
+      restorative: isRestorative,
+      start_time: ev.start_time||null,
+      duration_mins: Math.round((ev.eu_cost||2)*25), // ~25 min per EU as rough estimate
+      tethered: false,
+      done: false,
+    });
+  });
+
+  // 2. Sand blocks: daily necessities (always present for today)
+  if(isToday){
+    const sandItems=[
+      {name:"Shower",       eu:getDefaultTier("Shower",gate)?.eu??3},
+      {name:"Getting dressed",eu:getDefaultTier("Getting dressed",gate)?.eu??1},
+      {name:"Meal prep — light",eu:getDefaultTier("Meal prep — light",gate)?.eu??1,repeat:3},
+    ];
+    sandItems.forEach((item,i)=>{
+      const reps=item.repeat||1;
+      for(let r=0;r<reps;r++){
+        blocks.push({
+          id:`sand_${item.name.replace(/\s/g,"_")}_${r}`,
+          title:item.repeat?`${item.name} (${r===0?"breakfast":r===1?"lunch":"dinner"})`:item.name,
+          layer:"sand",
+          eu_cost:item.eu,
+          return_eu:0, return_note:"",
+          restorative:false,
+          start_time:null, duration_mins:Math.round(item.eu*20),
+          tethered:false, done:false,
+        });
+      }
+    });
+  }
+
+  // 3. Gap block: one default rest gap per day
+  blocks.push({
+    id:"gap_default_"+dateStr,
+    title:"Rest gap",
+    layer:"gap",
+    eu_cost:0, return_eu:0, return_note:"",
+    restorative:false,
+    start_time:null, duration_mins:GAP_DEFAULT_MINS,
+    tethered:false, done:false,
+  });
+
+  // 4. Apply tethering: pebble immediately before a rock gets tethered
+  // (future: detect by start_time proximity — skip for now, flag available)
+
+  return blocks;
+}
+
+// Build the unscheduled pool for a date/gate
+function buildUnscheduledPool(dateStr, gate, placedBlocks){
+  const placedTitles=new Set(placedBlocks.map(b=>b.title));
+  const pool=[];
+
+  // Pebble tasks from TASK_TIERS_DEFAULT not already placed and not Sand
+  Object.keys(TASK_TIERS_DEFAULT).forEach(taskName=>{
+    if(SAND_TASK_NAMES.has(taskName))return;
+    if(placedTitles.has(taskName))return;
+    if(RESTORATIVE_PRACTICES.some(p=>p.name===taskName))return;
+    const tier=getDefaultTier(taskName,gate);
+    if(!tier)return;
+    // Filter by gate for pool
+    if(gate==="red"&&tier.eu>2)return;
+    pool.push({
+      id:"pool_pebble_"+taskName.replace(/\s/g,"_"),
+      title:taskName,
+      layer:"pebble",
+      eu_cost:tier.eu, tier_label:tier.label,
+      return_eu:0, return_note:"",
+      restorative:false, duration_mins:Math.round(tier.eu*25)||20,
+    });
+  });
+
+  // Restorative practices not already placed
+  RESTORATIVE_PRACTICES.forEach(rp=>{
+    if(placedTitles.has(rp.name))return;
+    if(!practiceGateSafe(rp,gate))return;
+    const tier=getDefaultTier(rp.name,gate);
+    pool.push({
+      id:"pool_rp_"+rp.id,
+      title:rp.name,
+      layer:"rock",
+      eu_cost:tier?.eu??rp.eu_cost,
+      return_eu:rp.return_eu,
+      return_note:rp.return_note,
+      restorative:true, duration_mins:Math.round((tier?.eu??rp.eu_cost)*30)||30,
+    });
+  });
+
+  return pool;
+}
+
+// Calculate 3-part EU for a date
+function calcCanvasEu(dateStr, blocks){
+  const isToday=dateStr===todayStr();
+  const total = isToday ? S.eu_budget : forecastEuForDate(dateStr);
+
+  // Committed = Rock + Sand blocks
+  const committed = blocks
+    .filter(b=>LAYERS[b.layer]?.committedEu)
+    .reduce((s,b)=>s+(b.eu_cost||0),0);
+
+  const discretionary = Math.max(0, total - committed);
+  const overloaded = committed >= total;
+  return {total, committed, discretionary, overloaded};
+}
+
+// Day-level EU summary for week view
+function calcWeekDayEu(dateStr){
+  const blocks = buildCanvasBlocksForDate(dateStr);
+  return calcCanvasEu(dateStr, blocks);
+}
+
+// Format time slot label (hour lines for day view)
+function slotLabel(h){
+  if(h===0)return"12 am";
+  if(h<12)return h+" am";
+  if(h===12)return"12 pm";
+  return(h-12)+" pm";
+}
+
+
 function renderWeekView(){
-  const today=todayStr();
-  const days=Array.from({length:7},(_,i)=>dateAddDays(today,i));
-  const mods=calcBankingModifiers(EVENTS,today,dateAddDays(today,7));
+  // ── v10.0 Visual Pacing Canvas ──────────────────
+  const today = todayStr();
+  const view = S.canvas_view||"day";
+  const canvasDate = S.canvas_date||today;
+
+  // First-open: colour setup prompt
+  if(!S.canvas_colour_setup_done){
+    return renderCanvasColourSetup();
+  }
+
+  // View toggle header
+  const viewToggle = `<div style="display:flex;gap:0;border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:14px;flex-shrink:0">
+    <button id="canvas-view-day" style="flex:1;padding:7px;font-size:.78rem;cursor:pointer;background:${view==="day"?"var(--accent)":"var(--bg3)"};color:${view==="day"?"#fff":"var(--muted)"};border:none;font-weight:${view==="day"?"500":"400"}">Day</button>
+    <button id="canvas-view-week" style="flex:1;padding:7px;font-size:.78rem;cursor:pointer;background:${view==="week"?"var(--accent)":"var(--bg3)"};color:${view==="week"?"#fff":"var(--muted)"};border:none;border-left:1px solid var(--border);font-weight:${view==="week"?"500":"400"}">Week</button>
+  </div>`;
+
+  if(view==="week"){
+    return renderCanvasWeekView(today, viewToggle);
+  } else {
+    return renderCanvasDayView(canvasDate, today, viewToggle);
+  }
+}
+
+// ── Colour setup (first-time only) ───────────────
+function renderCanvasColourSetup(){
+  const cols=S.layer_colours;
+  const layerInfo=[
+    {k:"rock",  label:"Rock",   desc:"Fixed: appointments + restorative practices", sugg:"#a78bfa"},
+    {k:"pebble",label:"Pebble", desc:"Flexible tasks — moveable & reducible",       sugg:"#34d399"},
+    {k:"sand",  label:"Sand",   desc:"Necessities: shower, meals, meds",            sugg:"#fb923c"},
+    {k:"gap",   label:"Gap",    desc:"Protected rest time",                          sugg:"#93c5fd"},
+    {k:"water", label:"Water",  desc:"Unplanned / retrospective",                   sugg:"#6ee7b7"},
+  ];
+  return `<div class="section">
+    <div class="in" style="margin-bottom:16px">
+      <h2 style="margin-bottom:6px">Visual Pacing Canvas</h2>
+      <p style="font-size:.8rem;color:var(--muted);line-height:1.6">Before we open the canvas, choose a colour for each activity layer. These will colour-code your day so you can see your pacing at a glance. You can change them any time in Settings.</p>
+    </div>
+    <div class="card in" style="margin-bottom:14px">
+      ${layerInfo.map(l=>`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="width:22px;height:22px;border-radius:50%;background:${cols[l.k]||l.sugg};flex-shrink:0;border:2px solid rgba(255,255,255,.15)"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.84rem;font-weight:500">${l.label}</div>
+          <div style="font-size:.7rem;color:var(--muted)">${l.desc}</div>
+        </div>
+        <input type="color" id="col-${l.k}" value="${cols[l.k]||l.sugg}" style="width:44px;height:32px;border:none;border-radius:8px;cursor:pointer;background:transparent;padding:2px"/>
+      </div>`).join("")}
+    </div>
+    <p style="font-size:.72rem;color:var(--muted);margin-bottom:12px">Grey is reserved for screen time tracking — avoid it for layers. White and black reduce readability.</p>
+    <button id="btn-canvas-colours-save" class="btn btn-primary" style="width:100%;margin-bottom:8px">Open canvas with these colours</button>
+    <button id="btn-canvas-colours-default" class="btn btn-secondary" style="width:100%">Use defaults</button>
+  </div>`;
+}
+
+// ── DAY VIEW ─────────────────────────────────────
+function renderCanvasDayView(dateStr, today, viewToggle){
+  const isToday = dateStr===today;
+  const gate = isToday ? (S.gate||"green") : "green";
+
+  // Build blocks (use S.canvas_blocks if set for today, else build fresh)
+  let blocks;
+  if(isToday && S.canvas_blocks && S.canvas_blocks.length>0){
+    blocks = S.canvas_blocks;
+  } else {
+    blocks = buildCanvasBlocksForDate(dateStr);
+    if(isToday) S.canvas_blocks = blocks;
+  }
+
+  const {total, committed, discretionary, overloaded} = calcCanvasEu(dateStr, blocks);
+
+  // EU 3-part display
+  const euBanner = overloaded
+    ? `<div class="in" style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:12px;padding:12px 14px;margin-bottom:12px">
+        <div style="font-size:.82rem;font-weight:500;color:var(--red);margin-bottom:3px">Today's necessities fill your budget</div>
+        <div style="font-size:.75rem;color:var(--muted);line-height:1.6">This is a rest-only day. The tasks below are already accounted for. No discretionary EU remains — any extra activity draws from tomorrow.</div>
+      </div>`
+    : `<div class="card in" style="margin-bottom:12px;padding:12px 14px">
+        <div style="display:flex;gap:0;text-align:center">
+          <div style="flex:1;padding:0 4px">
+            <div style="font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Total</div>
+            <div style="font-size:1.2rem;font-weight:600;color:var(--subtle)">${total}</div>
+            <div style="font-size:.62rem;color:var(--muted)">EU today</div>
+          </div>
+          <div style="width:1px;background:var(--border);margin:4px 0"></div>
+          <div style="flex:1;padding:0 4px">
+            <div style="font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Committed</div>
+            <div style="font-size:1.2rem;font-weight:600;color:var(--orange)">${committed}</div>
+            <div style="font-size:.62rem;color:var(--muted)">non-negotiable</div>
+          </div>
+          <div style="width:1px;background:var(--border);margin:4px 0"></div>
+          <div style="flex:1;padding:0 4px">
+            <div style="font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Discretionary</div>
+            <div style="font-size:1.2rem;font-weight:600;color:${discretionary>=4?"var(--green)":discretionary>=2?"var(--yellow)":"var(--red)"}">${discretionary}</div>
+            <div style="font-size:.62rem;color:var(--muted)">yours to use</div>
+          </div>
+        </div>
+        <div style="margin-top:8px;height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;display:flex;gap:1px">
+          <div style="height:100%;width:${total>0?Math.min(100,Math.round(committed/total*100)):0}%;background:var(--orange);border-radius:2px 0 0 2px"></div>
+          <div style="height:100%;width:${total>0?Math.min(100,Math.round(discretionary/total*100)):0}%;background:var(--green);opacity:.6;border-radius:0 2px 2px 0"></div>
+        </div>
+      </div>`;
+
+  // Date nav
+  const dayLabel = new Date(dateStr+"T12:00").toLocaleDateString("en-NZ",{weekday:"long",day:"numeric",month:"short"});
+  const dateNav = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" class="in">
+    <button id="canvas-prev-day" style="background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;padding:4px 8px">←</button>
+    <div style="text-align:center">
+      <div style="font-size:.88rem;font-weight:500;color:${isToday?"var(--accent)":"var(--subtle)"}">${isToday?"Today — ":""}${dayLabel}</div>
+      ${!isToday?`<button id="canvas-goto-today" style="background:none;border:none;color:var(--accent);font-size:.72rem;cursor:pointer;padding:2px">Go to today</button>`:""}
+    </div>
+    <button id="canvas-next-day" style="background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;padding:4px 8px">→</button>
+  </div>`;
+
+  // Voluntary check-in button (always one tap away)
+  const voluntaryBtn = `<button id="canvas-voluntary" class="btn btn-secondary in" style="width:100%;margin-bottom:10px;font-size:.78rem;color:var(--subtle)">↺ Energy shift check-in</button>`;
+
+  // Build block list sorted: timed first (by time), then untimed
+  const timed   = blocks.filter(b=>b.start_time).sort((a,b)=>a.start_time.localeCompare(b.start_time));
+  const untimed = blocks.filter(b=>!b.start_time);
+  const sorted  = [...timed, ...untimed];
+
+  // Layer legend strip
+  const legendStrip = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" class="in">
+    ${Object.entries(LAYERS).map(([k,v])=>`<div style="display:flex;align-items:center;gap:4px;font-size:.64rem;color:var(--muted)">
+      <div style="width:8px;height:8px;border-radius:2px;background:${layerCol(k)};flex-shrink:0"></div>${v.label}
+    </div>`).join("")}
+    <button id="canvas-edit-colours" style="background:none;border:none;color:var(--muted);font-size:.64rem;cursor:pointer;margin-left:auto">edit colours</button>
+  </div>`;
+
+  // Block renderer
+  const blockHtml = (b, draggable=true) => {
+    const col    = layerCol(b.layer);
+    const bgCol  = layerCol(b.layer, 0.1);
+    const brdCol = layerCol(b.layer, 0.35);
+    const isDragTarget = S.canvas_drag_over===b.id;
+    const canDrag = draggable && b.layer!=="water";
+    const dragWarn = b.layer==="rock";
+    return `<div class="canvas-block${isDragTarget?" drag-over":""}" data-block-id="${b.id}"
+      draggable="${canDrag}"
+      style="display:flex;align-items:stretch;border-radius:10px;overflow:hidden;margin-bottom:6px;background:${bgCol};border:1px solid ${brdCol};cursor:${canDrag?"grab":"default"};opacity:${b.done?".5":gate==="red"&&b.layer==="pebble"&&b.eu_cost>2?".45":"1"}">
+      <div style="width:4px;background:${col};flex-shrink:0"></div>
+      <div style="flex:1;padding:9px 10px">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:.82rem;font-weight:500;color:var(--subtle);line-height:1.3">${b.restorative?"🌿 ":""}${escH(b.title)}${dragWarn?" 🔒":""}</div>
+            ${b.start_time?`<div style="font-size:.68rem;color:var(--muted);margin-top:1px">${b.start_time}${b.duration_mins?" · "+b.duration_mins+" min":""}</div>`:""}
+            ${b.return_eu?`<div style="font-size:.68rem;color:${layerCol("pebble")};margin-top:2px">${b.eu_cost} EU · returns ~${b.return_eu} ${b.return_note.includes("next")||b.return_note.includes("day")?"next day":"same day"}</div>`:
+              b.eu_cost?`<div style="font-size:.68rem;color:var(--muted);margin-top:2px">${b.eu_cost} EU · ${LAYERS[b.layer]?.label||b.layer}</div>`:""}
+          </div>
+          <div style="display:flex;gap:4px;flex-shrink:0;align-items:flex-start">
+            ${b.done?`<span style="font-size:.7rem;color:var(--green)">✓</span>`:`<button class="canvas-block-done" data-id="${b.id}" style="background:none;border:1px solid var(--border)!important;border-radius:5px;color:var(--muted);font-size:.65rem;cursor:pointer;padding:2px 5px">done</button>`}
+            ${b.layer!=="gap"?`<button class="canvas-block-remove" data-id="${b.id}" style="background:none;border:none;color:var(--muted);font-size:.9rem;cursor:pointer;padding:1px 3px" title="Remove">×</button>`:""}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  // Unscheduled pool
+  const pool = buildUnscheduledPool(dateStr, gate, blocks);
+  const poolHtml = pool.length ? `<div class="card in" style="margin-bottom:12px">
+    <div style="font-size:.76rem;font-weight:500;color:var(--muted);margin-bottom:8px">Unscheduled pool <span style="font-weight:400;font-size:.68rem">— drag into day or tap + to add</span></div>
+    <div style="max-height:200px;overflow-y:auto">
+      ${pool.map(p=>`<div class="pool-item" data-pool-id="${p.id}" draggable="true" style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:${layerCol(p.layer,0.07)};border:1px solid ${layerCol(p.layer,0.2)};border-radius:8px;margin-bottom:5px;cursor:grab">
+        <div>
+          <div style="font-size:.78rem;color:var(--subtle)">${p.restorative?"🌿 ":""}${escH(p.title)}</div>
+          <div style="font-size:.65rem;color:var(--muted)">${p.eu_cost} EU · ${p.tier_label||LAYERS[p.layer]?.label||""}</div>
+          ${p.return_eu?`<div style="font-size:.64rem;color:${layerCol("pebble")}">${p.return_note}</div>`:""}
+        </div>
+        <button class="pool-add" data-pool-id="${p.id}" style="background:var(--accent);border:none;color:#fff;font-size:.8rem;cursor:pointer;padding:4px 10px;border-radius:7px">+</button>
+      </div>`).join("")}
+    </div>
+  </div>` : "";
+
+  // Timed blocks section (if any have start_time)
+  const timedSection = timed.length ? `<div class="in" style="margin-bottom:10px">
+    <div style="font-size:.72rem;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Scheduled</div>
+    ${timed.map(b=>blockHtml(b)).join("")}
+  </div>` : "";
+
+  const untimedSection = untimed.length ? `<div class="in" style="margin-bottom:10px">
+    <div style="font-size:.72rem;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Unscheduled for today</div>
+    ${untimed.map(b=>blockHtml(b)).join("")}
+  </div>` : "";
+
+  // Water note
+  const waterNote = `<div class="in" style="margin-bottom:12px">
+    <button id="canvas-add-water" style="background:none;border:1px dashed var(--border)!important;border-radius:10px;width:100%;padding:8px;font-size:.74rem;color:var(--muted);cursor:pointer">+ Log something that happened (water layer)</button>
+  </div>`;
 
   return `<div class="section">
-    <h2 style="margin-bottom:4px">Week at a glance</h2>
-    <p style="color:var(--muted);font-size:.78rem;margin-bottom:16px">Projected EU budgets and scheduled events — plan tasks around the gaps.</p>
+    ${viewToggle}
+    ${dateNav}
+    ${euBanner}
+    ${voluntaryBtn}
+    ${legendStrip}
+    ${timedSection}
+    ${untimedSection}
+    ${poolHtml}
+    ${waterNote}
+  </div>`;
+}
+
+// ── WEEK VIEW ────────────────────────────────────
+function renderCanvasWeekView(today, viewToggle){
+  const days = Array.from({length:7},(_,i)=>dateAddDays(today,i));
+  const mods = calcBankingModifiers(EVENTS, today, dateAddDays(today,7));
+
+  const phaseCol = p => p==="Late luteal"?"#f87171":p==="Luteal"?"#fb923c":p==="Ovulation"?"#818cf8":"#34d399";
+
+  return `<div class="section">
+    ${viewToggle}
+    <p style="font-size:.74rem;color:var(--muted);margin-bottom:12px">Tap any day to open it in day view. Drag activity chips to reschedule.</p>
     ${days.map(d=>{
       const isToday=d===today;
-      const dayLabel=new Date(d+'T12:00').toLocaleDateString('en-NZ',{weekday:'short',day:'numeric',month:'short'});
-      const eu=isToday?S.eu_budget:forecastEuForDate(d);
-      const bankMod=mods[d]??1.0;
+      const {total,committed,discretionary,overloaded}=calcWeekDayEu(d);
+      const netBalance=total-committed;
       const dayEvents=EVENTS.filter(e=>e.date===d).sort((a,b)=>(a.start_time||"99:99").localeCompare(b.start_time||"99:99"));
-      const eventEuTotal=dayEvents.reduce((sum,e)=>sum+(e.eu_cost||0),0);
-      const euAfterEvents=eu-eventEuTotal;
       const phase=d===today&&S.ci?.phase?S.ci.phase:estimatePhaseForDate(d);
-      const phaseColour=phase==="Late luteal"?"#f87171":phase==="Luteal"?"#fb923c":phase==="Ovulation"?"#818cf8":"#34d399";
+      const bankMod=mods[d]??1.0;
+      const dayLabel=new Date(d+"T12:00").toLocaleDateString("en-NZ",{weekday:"short",day:"numeric",month:"short"});
+      const isDragOver = S.canvas_week_drag_over===d;
 
-      return `<div class="card" style="margin-bottom:10px${isToday?";border-color:var(--accent);border-width:1.5px":""}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+      return `<div class="card canvas-week-day${isDragOver?" drag-over":""}" data-date="${d}"
+        style="margin-bottom:8px${isToday?";border-color:var(--accent);border-width:1.5px":""}${overloaded?";background:rgba(248,113,113,.03)":""}${isDragOver?";border-color:var(--green)":""}">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px">
           <div>
-            <span style="font-weight:500;font-size:.9rem${isToday?";color:var(--accent)":""}">${isToday?"Today — ":""}${dayLabel}</span>
-            ${phase&&phase!=="Not tracking"?`<span style="font-size:.7rem;color:${phaseColour};margin-left:8px">${phase}</span>`:""}
+            <button class="canvas-week-open" data-date="${d}" style="background:none;border:none;cursor:pointer;text-align:left;padding:0">
+              <div style="font-size:.86rem;font-weight:500;color:${isToday?"var(--accent)":"var(--subtle)"}">${isToday?"Today — ":""}${dayLabel}</div>
+            </button>
+            ${phase&&phase!=="Not tracking"?`<span style="font-size:.64rem;color:${phaseCol(phase)}">${phase}</span>`:""}
+            ${bankMod<1?`<span style="font-size:.62rem;color:var(--orange);margin-left:6px">banking ×${bankMod.toFixed(2)}</span>`:""}
           </div>
-          <div style="text-align:right">
-            <div style="font-size:1rem;font-weight:500;color:${eu>=10?"#34d399":eu>=6?"#fbbf24":"#f87171"}">${eu} EU</div>
-            ${bankMod<1?`<div style="font-size:.65rem;color:var(--orange)">banking ×${bankMod.toFixed(2)}</div>`:""}
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:.88rem;font-weight:600;color:${netBalance>=4?"var(--green)":netBalance>=0?"var(--yellow)":"var(--red)"}">${total} EU</div>
+            <div style="font-size:.64rem;color:var(--muted);line-height:1.4">${committed} committed · <span style="color:${discretionary>=4?"var(--green)":discretionary>=2?"var(--yellow)":"var(--red)"}">${discretionary} free</span></div>
+            ${overloaded?`<div style="font-size:.6rem;color:var(--red)">rest-only day</div>`:""}
           </div>
         </div>
-        ${dayEvents.length?`
-        <div style="margin-bottom:6px">
-          ${dayEvents.map(e=>`
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:var(--bg3);border-radius:8px;margin-bottom:4px;font-size:.78rem">
-            <span style="color:var(--subtle)">${e.start_time?`<span style="color:var(--muted)">${e.start_time}</span> `:""}${e.title}</span>
-            <span style="color:var(--orange);font-weight:500">${e.eu_cost} EU</span>
-          </div>`).join("")}
+        ${dayEvents.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">
+          ${dayEvents.map(ev=>{
+            const isRp=RESTORATIVE_PRACTICES.some(p=>p.name===ev.title);
+            return `<div draggable="true" class="canvas-week-block" data-event-id="${ev.id}" data-from-date="${d}"
+              style="display:inline-flex;align-items:center;gap:4px;background:${layerCol(isRp?"rock":"rock",0.12)};border:1px solid ${layerCol(isRp?"rock":"rock",0.3)};border-radius:6px;padding:3px 7px;font-size:.7rem;color:var(--subtle);cursor:grab">
+              ${isRp?"🌿 ":""}${escH(ev.title)}
+              <span style="color:${layerCol("rock")};font-weight:500;margin-left:2px">${ev.eu_cost}eu</span>
+              ${isRp&&ev.return_eu?`<span style="color:${layerCol("pebble")};font-size:.6rem">+${ev.return_eu}</span>`:""}
+            </div>`;
+          }).join("")}
+        </div>`:""}
+        <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;display:flex;gap:1px">
+          ${committed>0?`<div style="height:100%;width:${Math.min(100,Math.round(committed/Math.max(total,1)*100))}%;background:var(--orange);border-radius:2px 0 0 2px"></div>`:""}
+          ${discretionary>0?`<div style="height:100%;width:${Math.min(100,Math.round(discretionary/Math.max(total,1)*100))}%;background:var(--green);opacity:.5"></div>`:""}
         </div>
-        <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted);padding:4px 2px;border-top:1px solid var(--border)">
-          <span>After events: <strong style="color:${euAfterEvents>=4?"var(--green)":euAfterEvents>=1?"var(--yellow)":"var(--red)"}">${euAfterEvents} EU free</strong></span>
-          <span>${eventEuTotal} EU committed</span>
-        </div>`:
-        `<div style="font-size:.75rem;color:var(--border);padding:4px 2px">No events scheduled — ${eu} EU available</div>`}
+        ${netBalance<0?`<div style="font-size:.65rem;color:var(--red);margin-top:4px">⚠ ${Math.abs(netBalance)} EU drawn from following day</div>`:""}
       </div>`;
     }).join("")}
-    <p style="color:var(--muted);font-size:.72rem;margin-top:8px;text-align:center">Projections based on today's profile. Actual values depend on morning check-in.</p>
+    <p style="font-size:.68rem;color:var(--muted);margin-top:4px;text-align:center">Projections from today's profile. Actuals depend on morning check-ins.</p>
   </div>`;
 }
 
@@ -5010,6 +5474,234 @@ function bindMain(){
   }
 
   document.getElementById("main-home")?.addEventListener("click",()=>{S.screen="home";render();});
+  // ── v10.0 — Canvas bindings ──────────────────────
+
+  // View toggle
+  document.getElementById("canvas-view-day")?.addEventListener("click",()=>{S.canvas_view="day";render();});
+  document.getElementById("canvas-view-week")?.addEventListener("click",()=>{S.canvas_view="week";render();});
+
+  // Day nav
+  document.getElementById("canvas-prev-day")?.addEventListener("click",()=>{
+    S.canvas_date=dateAddDays(S.canvas_date||todayStr(),-1);
+    S.canvas_blocks=[];render();
+  });
+  document.getElementById("canvas-next-day")?.addEventListener("click",()=>{
+    S.canvas_date=dateAddDays(S.canvas_date||todayStr(),1);
+    S.canvas_blocks=[];render();
+  });
+  document.getElementById("canvas-goto-today")?.addEventListener("click",()=>{
+    S.canvas_date=todayStr();S.canvas_blocks=[];render();
+  });
+
+  // Open canvas voluntary check-in
+  document.getElementById("canvas-voluntary")?.addEventListener("click",()=>{
+    S.show_voluntary=true;S.voluntary_step=0;S.voluntary_data={};render();
+  });
+
+  // Colour setup — save
+  document.getElementById("btn-canvas-colours-save")?.addEventListener("click",()=>{
+    ["rock","pebble","sand","gap","water"].forEach(k=>{
+      const el=document.getElementById("col-"+k);
+      if(el)S.layer_colours[k]=el.value;
+    });
+    S.canvas_colour_setup_done=true;S.canvas_colour_setup_open=false;
+    saveLayerColours();render();
+  });
+  document.getElementById("btn-canvas-colours-default")?.addEventListener("click",()=>{
+    S.layer_colours={rock:"#a78bfa",pebble:"#34d399",sand:"#fb923c",gap:"#93c5fd",water:"#6ee7b7"};
+    S.canvas_colour_setup_done=true;S.canvas_colour_setup_open=false;
+    saveLayerColours();render();
+  });
+  document.getElementById("canvas-edit-colours")?.addEventListener("click",()=>{
+    S.canvas_colour_setup_done=false;render();
+  });
+
+  // Block done toggle
+  document.querySelectorAll(".canvas-block-done").forEach(btn=>btn.addEventListener("click",()=>{
+    const id=btn.dataset.id;
+    S.canvas_blocks=S.canvas_blocks.map(b=>b.id===id?{...b,done:!b.done}:b);
+    render(); saveCanvasBlocks();
+  }));
+
+  // Block remove (except gap)
+  document.querySelectorAll(".canvas-block-remove").forEach(btn=>btn.addEventListener("click",()=>{
+    const id=btn.dataset.id;
+    const block=S.canvas_blocks.find(b=>b.id===id);
+    if(!block)return;
+    if(block.layer==="rock"&&!confirm(`Remove "${block.title}" from today? Restorative practices are deleted if missed — not carried forward.`))return;
+    S.canvas_blocks=S.canvas_blocks.filter(b=>b.id!==id);
+    render(); saveCanvasBlocks();
+  }));
+
+  // Pool add to day
+  document.querySelectorAll(".pool-add").forEach(btn=>btn.addEventListener("click",()=>{
+    const poolId=btn.dataset.poolId;
+    const canvasDate=S.canvas_date||todayStr();
+    const pool=buildUnscheduledPool(canvasDate,S.gate||"green",S.canvas_blocks);
+    const item=pool.find(p=>p.id===poolId);
+    if(!item)return;
+    S.canvas_blocks=[...(S.canvas_blocks||[]),{
+      id:"placed_"+Date.now(),
+      title:item.title, layer:item.layer, eu_cost:item.eu_cost,
+      return_eu:item.return_eu||0, return_note:item.return_note||"",
+      restorative:item.restorative||false,
+      start_time:null, duration_mins:item.duration_mins||30,
+      tethered:false, done:false,
+    }];
+    render();
+  }));
+
+  // Add water annotation
+  document.getElementById("canvas-add-water")?.addEventListener("click",()=>{
+    const title=prompt("What happened? (water layer — unplanned)");
+    if(!title)return;
+    const euStr=prompt("EU cost (rough estimate, or 0):")||"0";
+    S.canvas_blocks=[...(S.canvas_blocks||[]),{
+      id:"water_"+Date.now(),
+      title, layer:"water", eu_cost:parseFloat(euStr)||0,
+      return_eu:0, return_note:"",
+      restorative:false, start_time:null, duration_mins:30,
+      tethered:false, done:true,
+    }];
+    render(); saveCanvasBlocks();
+  });
+
+  // Week view: open day on tap
+  document.querySelectorAll(".canvas-week-open").forEach(btn=>btn.addEventListener("click",()=>{
+    S.canvas_date=btn.dataset.date;
+    S.canvas_blocks=[];
+    S.canvas_view="day";
+    render();
+  }));
+
+  // ── Drag and drop (day view — reorder blocks) ─
+  let _dragId=null;
+  document.querySelectorAll(".canvas-block[draggable='true']").forEach(el=>{
+    el.addEventListener("dragstart",e=>{
+      _dragId=el.dataset.blockId;
+      S.canvas_drag_id=_dragId;
+      e.dataTransfer.effectAllowed="move";
+      el.style.opacity=".4";
+    });
+    el.addEventListener("dragend",()=>{
+      el.style.opacity="";
+      S.canvas_drag_id=null;
+      S.canvas_drag_over=null;
+      _dragId=null;
+      render();
+    });
+  });
+  document.querySelectorAll(".canvas-block").forEach(el=>{
+    el.addEventListener("dragover",e=>{
+      e.preventDefault();
+      e.dataTransfer.dropEffect="move";
+      const targetId=el.dataset.blockId;
+      if(targetId&&targetId!==_dragId){
+        S.canvas_drag_over=targetId;
+      }
+    });
+    el.addEventListener("drop",e=>{
+      e.preventDefault();
+      const toId=el.dataset.blockId;
+      if(!_dragId||!toId||_dragId===toId)return;
+      const from=S.canvas_blocks.findIndex(b=>b.id===_dragId);
+      const to=S.canvas_blocks.findIndex(b=>b.id===toId);
+      if(from===-1||to===-1)return;
+      const fromBlock=S.canvas_blocks[from];
+      if(fromBlock.layer==="rock"&&!fromBlock.restorative){
+        if(!confirm("Moving a fixed appointment — are you sure?"))return;
+      }
+      const arr=[...S.canvas_blocks];
+      const [moved]=arr.splice(from,1);
+      arr.splice(to,0,moved);
+      S.canvas_blocks=arr;
+      S.canvas_drag_over=null;
+      render(); saveCanvasBlocks();
+    });
+  });
+
+  // ── Pool drag to day ──────────────────────────
+  let _poolDragId=null;
+  document.querySelectorAll(".pool-item[draggable='true']").forEach(el=>{
+    el.addEventListener("dragstart",e=>{
+      _poolDragId=el.dataset.poolId;
+      e.dataTransfer.effectAllowed="copy";
+      el.style.opacity=".4";
+    });
+    el.addEventListener("dragend",()=>{
+      el.style.opacity="";
+      _poolDragId=null;
+    });
+  });
+  // Drop on the section to add from pool
+  document.querySelector(".section")?.addEventListener("drop",e=>{
+    e.preventDefault();
+    if(!_poolDragId)return;
+    const canvasDate=S.canvas_date||todayStr();
+    const pool=buildUnscheduledPool(canvasDate,S.gate||"green",S.canvas_blocks||[]);
+    const item=pool.find(p=>p.id===_poolDragId);
+    if(!item)return;
+    S.canvas_blocks=[...(S.canvas_blocks||[]),{
+      id:"placed_"+Date.now(),
+      title:item.title, layer:item.layer, eu_cost:item.eu_cost,
+      return_eu:item.return_eu||0, return_note:item.return_note||"",
+      restorative:item.restorative||false,
+      start_time:null, duration_mins:item.duration_mins||30,
+      tethered:false, done:false,
+    }];
+    _poolDragId=null;
+    render(); saveCanvasBlocks();
+  });
+  document.querySelector(".section")?.addEventListener("dragover",e=>e.preventDefault());
+
+  // ── Week view: drag blocks to different day ───
+  let _weekDragId=null, _weekFromDate=null;
+  document.querySelectorAll(".canvas-week-block[draggable='true']").forEach(el=>{
+    el.addEventListener("dragstart",e=>{
+      _weekDragId=el.dataset.eventId;
+      _weekFromDate=el.dataset.fromDate;
+      S.canvas_week_drag={event_id:_weekDragId,from_date:_weekFromDate};
+      e.dataTransfer.effectAllowed="move";
+      el.style.opacity=".4";
+    });
+    el.addEventListener("dragend",()=>{
+      el.style.opacity="";
+      S.canvas_week_drag=null;
+      S.canvas_week_drag_over=null;
+      _weekDragId=null;_weekFromDate=null;
+      render();
+    });
+  });
+  document.querySelectorAll(".canvas-week-day").forEach(col=>{
+    col.addEventListener("dragover",e=>{
+      if(!_weekDragId)return;
+      e.preventDefault();
+      S.canvas_week_drag_over=col.dataset.date;
+    });
+    col.addEventListener("drop",async e=>{
+      e.preventDefault();
+      const toDate=col.dataset.date;
+      if(!_weekDragId||!toDate||toDate===_weekFromDate)return;
+      // Move event: update EVENTS array and save
+      const evIdx=EVENTS.findIndex(ev=>ev.id===_weekDragId);
+      if(evIdx===-1)return;
+      const ev=EVENTS[evIdx];
+      if(ev.type==="restorative"||RESTORATIVE_PRACTICES.some(p=>p.name===ev.title)){
+        if(!confirm("Moving a restorative practice — this changes when the return EU is projected. Continue?"))return;
+      }
+      EVENTS[evIdx]={...ev, date:toDate};
+      try{
+        await sbQuery("pacing_arc_events","PATCH",{date:toDate},{id:`eq.${ev.id}`});
+        showToast("Moved to "+new Date(toDate+"T12:00").toLocaleDateString("en-NZ",{weekday:"short",day:"numeric",month:"short"}),"green");
+      }catch(err){
+        showToast("Saved locally — sync to update","red");
+      }
+      S.canvas_week_drag=null; S.canvas_week_drag_over=null;
+      _weekDragId=null; _weekFromDate=null;
+      render();
+    });
+  });
+
   document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>{
     const newTab=b.dataset.tab;
     S.tab=newTab;
@@ -5036,7 +5728,7 @@ function bindMain(){
     const syms=[...document.querySelectorAll(".wakeup-sym-btn.sel")].map(b=>b.dataset.sym);
     applyWakeupRefresh(bb,energy,syms);
     S.show_wakeup_check=false;
-    render();
+    render(); saveCanvasBlocks();
   });
 
   // Pantry audit prompt buttons (Plan tab)
