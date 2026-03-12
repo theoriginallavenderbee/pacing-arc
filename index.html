@@ -1120,6 +1120,11 @@ async function init(){
           if(today.checkin&&Object.keys(today.checkin).length>Object.keys(S.ci||{}).length)S.ci=today.checkin;
           if(today.evening_done)S.evening_done=true;
           if(today.midday_done)S.midday_done=true;
+          // v10.1: sync canvas blocks across devices
+          if(today.canvas_blocks&&Array.isArray(today.canvas_blocks)&&today.canvas_blocks.length){
+            S.canvas_blocks=today.canvas_blocks;
+          }
+          if(today.canvas_date)S.canvas_date=today.canvas_date;
           render();
         }
       }catch{}
