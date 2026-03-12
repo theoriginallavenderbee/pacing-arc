@@ -1,27 +1,21 @@
 <!--
-=== SUPABASE MIGRATIONS REQUIRED (v10.3) ===
+=== SUPABASE MIGRATIONS REQUIRED (v10.4) ===
 Run these in the Supabase SQL editor before deploying.
 
--- 1. Add spread_days column (multi-day event cost distribution)
+-- v10.3 migrations (run if not already done):
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS spread_days integer DEFAULT 1;
-
--- 2. Add start_time column (already required since v9.0)
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS start_time text;
-
--- 3. Add end_time column (new in v10.3 — event edit sheet now has end time)
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS end_time text;
-
--- 4. Add location column (new in v10.3 — Google Calendar-style event sheet)
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS location text;
-
--- 5. Verify notes column exists (may already be present)
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS notes text;
-
--- 6. Add buffer_eu and recovery_days if missing
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS buffer_eu integer;
 ALTER TABLE pacing_arc_events ADD COLUMN IF NOT EXISTS recovery_days integer;
 
-=== END MIGRATIONS ===
+-- v10.4 NEW migrations:
+ALTER TABLE pacing_arc ADD COLUMN IF NOT EXISTS companion_state jsonb;
+ALTER TABLE pacing_arc ADD COLUMN IF NOT EXISTS supplement_log jsonb;
+
+===================================================
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -902,6 +896,7 @@ async function loadEventsAndTemplates(){
 // ═══════════════════════════════════════════════════
 let PROFILE=null;
 let SYNC_STATUS="loading";
+let SYNC_LAST_AT=null; // v10.4 Part 10b: timestamp of last successful sync
 let WEATHER=null;
 let EVENTS=[];
 let TEMPLATES=[];
@@ -1017,6 +1012,13 @@ let S={
     water:"#6ee7b7",
   },
   // v10.3 — pool variant picker and AI companion
+  show_block_edit:false,       // inline block edit sheet open
+  block_edit:null,             // block being edited
+  event_sheet_draft:null,      // v10.4 Fix 4: persists event form fields across re-renders
+  supplement_log:{},           // v10.4 Part 4e: {date: {key: {name,dose,time}}}
+  companion_live_guidance:null, // v10.4 Part 4b: 2-sentence live read
+  pool_section_open:{},        // v10.4 Part 7a: which pool sections are expanded
+  canvas_log_open:false,       // v10.4 Part 5a: today's log section open in day view
   pool_variant_pick:null,      // pool item being variant-picked
   ai_companion_open:false,     // companion chat panel open
   ai_friction_log:[],          // [{text, ts}] friction notes
@@ -1089,6 +1091,7 @@ async function init(){
           S.canvas_blocks=today.canvas_blocks;
         }
         if(today.canvas_date)S.canvas_date=today.canvas_date;
+        if(today.supplement_log&&typeof today.supplement_log==="object") S.supplement_log=today.supplement_log; // v10.4
         // Restore crash persistence from carry-forward
         if(!S.in_crash&&today.in_crash)S.in_crash=today.in_crash;
         // Always recalculate gate and EU from the stored check-in using the
@@ -1119,7 +1122,15 @@ async function init(){
       // Load maintenance log
       await loadMaintenanceLog();
       await loadMealData();
-      SYNC_STATUS="ok";
+      // v10.4 Part 9b: load companion state
+      try{
+        const companionRow=await sbGet("pacing_arc",{device_id:DEVICE_ID(),date:"companion"});
+        if(companionRow?.companion_state){
+          S.ai_friction_log=companionRow.companion_state.friction_log||[];
+          S.ai_messages=companionRow.companion_state.messages||[];
+        }
+      }catch{}
+      SYNC_STATUS="ok"; SYNC_LAST_AT=new Date();
       S.screen="home";
     } else {
       // Supabase returned no profile row — check localStorage before showing setup
@@ -1134,7 +1145,7 @@ async function init(){
         await loadEventsAndTemplates();
         await loadMaintenanceLog();
         await loadMealData();
-        SYNC_STATUS="ok";
+        SYNC_STATUS="ok"; SYNC_LAST_AT=new Date();
         S.screen="home";
       } else {
         SYNC_STATUS="ok";
@@ -1232,6 +1243,68 @@ async function fetchWeather(){
     if(WEATHER.temp>26)autoEnv.push("Temp >26°C");
     if(autoEnv.length&&!S.ci.env)S.ci.env=autoEnv;
   }
+}
+
+// ── MOON PHASE (v10.4 Part 4a) ─────────────────────────────────
+// Known new moon reference: 2025-01-29. Synodic period = 29.53059 days.
+function getLunarAge(dateStr){
+  const REF_NEW_MOON = new Date("2025-01-29T12:00:00Z");
+  const d = new Date(dateStr+"T12:00:00Z");
+  const diffDays = (d - REF_NEW_MOON) / 86400000;
+  const PERIOD = 29.53059;
+  return ((diffDays % PERIOD) + PERIOD) % PERIOD;
+}
+function getMoonPhaseName(age){
+  if(age<1.85||age>=27.68)return "New moon";
+  if(age<7.38)return "Waxing crescent";
+  if(age<9.22)return "First quarter";
+  if(age<14.77)return "Waxing gibbous";
+  if(age<16.61)return "Full moon";
+  if(age<22.15)return "Waning gibbous";
+  if(age<23.99)return "Last quarter";
+  return "Waning crescent";
+}
+function isNearFullMoon(dateStr){
+  const age = getLunarAge(dateStr);
+  // Full moon ±3 days = age 11.77–17.61 approx
+  return age>=11.77 && age<=17.61;
+}
+function getMoonEmoji(age){
+  if(age<1.85||age>=27.68)return "🌑";
+  if(age<7.38)return "🌒";
+  if(age<9.22)return "🌓";
+  if(age<14.77)return "🌔";
+  if(age<16.61)return "🌕";
+  if(age<22.15)return "🌖";
+  if(age<23.99)return "🌗";
+  return "🌘";
+}
+function renderModifierPills(){
+  const today=todayStr();
+  const phase=calcPhaseForDate(today)||"";
+  const pills=[];
+  // Late luteal
+  if(phase==="Late luteal") pills.push({icon:"🌒",label:"Late luteal −25%",tip:"You're in late luteal phase — capacity is reduced by ~25%.",col:"rgba(248,113,113,.8)"});
+  // Full moon
+  const age=getLunarAge(today);
+  const moonName=getMoonPhaseName(age);
+  const nearFull=isNearFullMoon(today);
+  if(nearFull) pills.push({icon:"🌕",label:"Full moon",tip:"Bright moon tonight may affect sleep — consider blackout.",col:"rgba(251,191,36,.8)"});
+  // Māramataka (lunar phase name — always shown)
+  pills.push({icon:getMoonEmoji(age),label:`Māramataka: ${moonName}`,tip:`You are in the ${moonName} phase of the lunar cycle. Activity alignment guidance coming in a future update.`,col:"rgba(148,163,184,.8)"});
+  // Weather modifiers
+  if(WEATHER){
+    if(WEATHER.uv>7) pills.push({icon:"☀️",label:"UV high −25%",tip:`UV index is ${WEATHER.uv} today — high UV affects energy capacity.`,col:"rgba(251,191,36,.8)"});
+    if(WEATHER.temp>26) pills.push({icon:"🌡️",label:`Heat −25%`,tip:`${WEATHER.temp}°C forecast today — heat above 26°C reduces capacity.`,col:"rgba(248,113,113,.7)"});
+  }
+  // Garmin
+  if(S.ci&&S.ci.garmin_ratio&&S.ci.garmin_ratio<1.0){
+    const pct=Math.round(S.ci.garmin_ratio*100);
+    pills.push({icon:"📉",label:`Garmin ${pct}%`,tip:`Garmin calibration shows you're at ${pct}% of baseline — EU budget adjusted accordingly.`,col:"rgba(148,163,184,.8)"});
+  }
+  if(!pills.length) return "";
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" class="in">${pills.map((p,i)=>`<button class="modifier-pill" data-pill-idx="${i}" title="${escH(p.tip)}" style="background:var(--bg3);border:1px solid var(--border)!important;border-radius:20px;padding:3px 9px;font-size:.68rem;color:var(--subtle);cursor:pointer;display:flex;align-items:center;gap:4px"><span>${p.icon}</span><span>${p.label}</span></button>`).join("")}</div>
+  <div id="modifier-pill-tips" style="display:none"></div>`;
 }
 
 function weatherStripHtml(){
@@ -1732,6 +1805,8 @@ function euBudget(ci,bankingMod){
 
 function gateEmoji(g){return g==="green"?"🟢":g==="yellow"?"🟡":"🔴";}
 function gateClass(g){return "tl tl-"+g;}
+// v10.4: Traffic light display labels (word "gate" never appears in UI)
+function gateLabel(g){return g==="green"?"Go":g==="yellow"?"Slow down":"Stop";}
 function euPct(){return Math.min(100,Math.round((S.eu_used/S.eu_budget)*100));}
 function euColor(){const p=euPct();return p<50?"#34d399":p<80?"#fbbf24":"#f87171";}
 function escH(t){
@@ -2588,7 +2663,7 @@ function renderHome(){
     <div style="width:100%;max-width:360px;display:flex;flex-direction:column;gap:10px" class="in">
       ${checkinDone
         ?`<button class="btn btn-secondary" id="btn-voluntary-home" style="width:100%;border-color:rgba(148,163,184,.3)!important;color:var(--subtle);font-size:.875rem">↺ Energy shift check-in</button>`
-        :`<button class="btn btn-primary" id="btn-start" style="width:100%">${(()=>{const h=new Date().getHours();return h<12?"🌅 Morning check-in":h<17?"🌤 Afternoon check-in":"🌙 Evening check-in";})()}</button>`}
+        :`<button class="btn btn-primary" id="btn-start" style="width:100%">${(()=>{const h=new Date().getHours();return h<12?"🌅 Start of day":h<17?"🌤 Start of day":"🌙 Start of day";})()}</button>`}
       ${todayLoaded?`<button class="btn btn-secondary" id="btn-resume" style="width:100%">📋 Resume today's plan</button>`:""}
       <button class="btn btn-secondary" id="btn-events" style="width:100%">📅 Events & planner</button>
       ${S.in_crash?`<button class="btn" id="btn-crash" style="width:100%;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.3)!important;color:var(--red)">🚨 Crash containment</button>`:""}
@@ -2740,7 +2815,7 @@ function renderCheckin(){
   const isLast=S.ci_step===CI_STEPS.length-1;
   // v9.1 — time-aware check-in label
   const ciHour=new Date().getHours();
-  const ciLabel=ciHour<12?"Morning check-in":ciHour<17?"Afternoon check-in":"Evening check-in";
+  const ciLabel="Start of day";
   return `<div style="display:flex;flex-direction:column;min-height:100vh" class="safe-t">
     <div class="header"><button class="btn-ghost" id="ci-back">←</button>
       <div style="flex:1"><div style="height:3px;background:var(--bg3);border-radius:2px"><div style="height:100%;width:${pct}%;border-radius:2px;background:linear-gradient(90deg,var(--accent),var(--accent2))"></div></div></div>
@@ -2838,7 +2913,7 @@ function bindCheckin(){
       setTimeout(async()=>{
         try{
           const ctx=buildCompanionContext();
-          const sysPrompt=`You are the Pacing Arc AI companion helping someone with ME/CFS manage their energy. Be warm, direct, grounding. Short response (3-5 sentences max).\n\nContext:\n${ctx}`;
+          const sysPrompt=buildCompanionSystemPrompt()+"\n\nContext:\n"+ctx;
           S.ai_messages=[...(S.ai_messages||[])];
           const reply=await callCompanionAPI([{role:"user",content:"Give me a brief morning summary: what does today look like based on my check-in, what are the key risks, and one thing to watch for."}],sysPrompt);
           S.ai_morning_brief=reply;
@@ -2852,17 +2927,16 @@ function bindCheckin(){
 // ── MAIN ──────────────────────────────────────────
 function renderMain(){
   const tabs=[
-    {id:"plan",icon:"📋",label:"Plan"},
-    {id:"tasks",icon:"⚡",label:"Tasks"},
+    {id:"plan",icon:"🏠",label:"Dashboard"},
     {id:"week",icon:"🗓",label:"Week"},
     {id:"events",icon:"📅",label:"Events"},
-    {id:"home",icon:"🏠",label:"House"},
+    {id:"home",icon:"🏡",label:"House"},
     {id:"meals",icon:"🍱",label:"Meals"},
     {id:"crash",icon:"🚨",label:"Crash"}
   ];
   let content="";
   if(S.tab==="plan")content=renderPlan();
-  if(S.tab==="tasks")content=renderTasks();
+  if(S.tab==="tasks")content=renderTasks(); // preserved but not shown in nav
   if(S.tab==="week")content=renderWeekView();
   if(S.tab==="events")content=renderEvents();
   if(S.tab==="home")content=renderMaintenance();
@@ -2882,6 +2956,7 @@ function renderMain(){
   if(S.show_log_rest)sheets.push(renderLogRestSheet());
   if(S.show_retroactive_sheet)sheets.push(renderRetroactiveSheet()); // v9.0
   if(S.show_log_past_sheet)sheets.push(renderLogPastSheet()); // v9.0
+  if(S.show_block_edit)sheets.push(renderBlockEditSheet()); // v10.4 Fix 2
   if(S.pool_variant_pick)sheets.push(renderPoolVariantSheet()); // v10.3
   if(S.ai_companion_open)sheets.push(renderCompanionPanel()); // v10.3
 
@@ -2890,10 +2965,11 @@ function renderMain(){
       <button class="btn-ghost" id="main-home">←</button>
       <div><div style="font-family:var(--serif);font-size:1rem">Pacing Arc</div>
         <div style="font-size:.7rem;color:var(--muted)">${new Date().toLocaleDateString('en-NZ',{weekday:'short',day:'numeric',month:'short'})}</div></div>
-      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
-        <span class="${gateClass(S.gate)}" style="font-size:.7rem">${gateEmoji(S.gate)} ${S.gate}</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <button id="btn-how-am-i" style="background:var(--bg3);border:1px solid var(--border)!important;border-radius:8px;color:var(--subtle);font-size:.68rem;cursor:pointer;padding:4px 8px;white-space:nowrap">↺ How am I now?</button>
+        <span class="${gateClass(S.gate)}" style="font-size:.7rem">${gateEmoji(S.gate)} ${gateLabel(S.gate)}</span>
         <span style="font-size:.75rem;color:${euColor()};font-weight:500">${S.eu_used>S.eu_budget?`${S.eu_used-S.eu_budget} EU drawn from tomorrow`:`${S.eu_budget-S.eu_used} EU`}</span>
-        <span class="sync-dot ${SYNC_STATUS==="ok"?"sync-ok":SYNC_STATUS==="off"?"sync-off":"sync-busy"}"></span>
+        <span class="sync-dot ${SYNC_STATUS==="ok"?"sync-ok":SYNC_STATUS==="off"?"sync-off":"sync-busy"}" id="sync-dot-header" title="${SYNC_LAST_AT?`Last synced ${SYNC_LAST_AT.toLocaleTimeString("en-NZ",{hour:"2-digit",minute:"2-digit"})}`:"Syncing…"}" style="cursor:pointer"></span>
       </div>
     </div>
     <div style="flex:1;overflow-y:auto">${content}</div>
@@ -2924,7 +3000,8 @@ function renderPlan(){
         <button id="dismiss-morning-brief" style="background:none;border:none;color:var(--muted);font-size:.68rem;cursor:pointer;margin-top:4px;padding:0">dismiss</button>
       </div>
     </div>`:""}
-    ${todBanner?`<div style="background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:12px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;font-size:.78rem;color:var(--subtle)" class="in"><span>${todBanner.icon}</span><span style="color:${todBanner.col}">${todBanner.msg}</span></div>`:""}
+    ${S.companion_live_guidance&&aiEnabled()?`<div style="background:rgba(56,189,248,.04);border:1px solid rgba(56,189,248,.12);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:.8rem;color:var(--subtle);line-height:1.6" class="in">${escH(S.companion_live_guidance)}</div>`:""}
+        ${todBanner?`<div style="background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:12px;padding:10px 14px;margin-bottom:12px;display:flex;gap:10px;font-size:.78rem;color:var(--subtle)" class="in"><span>${todBanner.icon}</span><span style="color:${todBanner.col}">${todBanner.msg}</span></div>`:""}
     ${renderMicroAdjCard()}
     ${overexertion==="red"?`<div class="overexertion-banner in" style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25)"><span>🔴</span><div><span style="font-size:.8rem;color:var(--red)">EU budget reached — rest now.</span><div style="font-size:.72rem;color:var(--muted);margin-top:2px">Still here. Still tracking. Rest is the task now — micro-actions and water are always available below.</div></div></div>`:""}
     ${overexertion==="amber"?`<div class="overexertion-banner in" style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2)"><span>⚠️</span><span style="font-size:.8rem;color:var(--yellow)">80% of EU budget used — consider stopping for today.</span></div>`:""}
@@ -2966,6 +3043,7 @@ function renderPlan(){
       </div>
     </div>
     ${WEATHER?weatherStripHtml():""}
+    ${renderModifierPills()}
     ${S.ci&&S.ci.eaten_yet&&S.ci.eaten_yet!=="Yes"&&!S.ci.first_meal_time?`
     <div class="card-sm in" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
       <span style="font-size:.8rem;color:var(--muted)">🍽 First meal today?</span>
@@ -2982,29 +3060,15 @@ function renderPlan(){
       ${p.midday_updated?`<div class="plan-row"><span style="font-size:.8rem;color:var(--yellow)">⚠ Updated mid-day</span></div>`:""}
       <div style="margin-top:12px;margin-bottom:4px"><h3>Priority tasks</h3></div>
       ${p.tasks.length?p.tasks.map(([name,cost,adj])=>`<div class="plan-row"><span style="font-size:.8rem">${name}${adj?" ⚠":""}</span><span style="font-size:.75rem;color:var(--muted)">${cost} EU${adj?" (ortho)":""}</span></div>`).join(""):`<div style="font-size:.8rem;color:var(--muted);padding:8px 0">Rest and recovery only today.</div>`}
-      <div style="margin-top:12px;margin-bottom:6px;display:flex;align-items:baseline;gap:7px"><h3>Restorative practices</h3><span class="restorative-tag">investments</span></div>
-      ${(()=>{
-        const gate=S.gate||"green";
-        const safe=RESTORATIVE_PRACTICES.filter(p=>practiceGateSafe(p,gate));
-        const unsafe=RESTORATIVE_PRACTICES.filter(p=>!practiceGateSafe(p,gate));
-        const rows=safe.map(pr=>{
-          const tier=getDefaultTier(pr.name,gate);
-          const eu=tier?.eu??pr.eu_cost;
-          return `<div class="plan-row"><span style="font-size:.8rem">🌿 ${pr.name}<br><span style="font-size:.65rem;color:var(--muted)">${tier?.label||""}</span></span><div style="text-align:right"><div style="font-size:.75rem;color:var(--muted)">${eu} EU</div><span class="return-pill" style="margin-top:2px;display:inline-block">${pr.return_note}</span></div></div>`;
-        });
-        if(unsafe.length){
-          rows.push(`<div style="font-size:.72rem;color:var(--muted);padding:6px 0">⚠ ${unsafe.map(p=>p.name).join(", ")} — not recommended on ${gate} gate</div>`);
-        }
-        return rows.join("")||`<div style="font-size:.8rem;color:var(--muted);padding:6px 0">No practices available at this gate.</div>`;
-      })()}
+      <!-- Restorative practices moved to canvas pool (v10.4) -->
       <div style="margin-top:12px;margin-bottom:4px"><h3>Watch for</h3></div>
       ${p.warnings.map(w=>`<div style="font-size:.78rem;color:var(--subtle);padding:4px 0;display:flex;gap:8px"><span style="color:var(--yellow)">·</span>${w}</div>`).join("")}
-    </div>`:`<div class="card in" style="margin-bottom:16px"><p style="color:var(--muted);font-size:.875rem">Complete morning check-in to get your plan.</p></div>`}
+    </div>`:`<div class="card in" style="margin-bottom:16px"><p style="color:var(--muted);font-size:.875rem">Complete start-of-day check-in to get your plan.</p></div>`}
     ${renderForecastStrip()}
     ${isMiddayWindow()?`<button class="btn btn-secondary in" id="btn-midday" style="width:100%;margin-bottom:14px">🕐 Mid-day check-in</button>`:""}
-    ${isEvening&&!S.evening_done?`<button class="btn btn-secondary in" id="btn-evening" style="width:100%;margin-bottom:14px;border-color:rgba(129,140,248,.3)!important;color:var(--accent2)">🌙 Evening check-in</button>`:""}
-    <button class="btn btn-secondary in" id="btn-voluntary" style="width:100%;margin-bottom:14px;border-color:rgba(148,163,184,.25)!important;color:var(--subtle);font-size:.82rem">↺ Energy shift check-in</button>
-    ${isEvening&&S.evening_done?`<div style="font-size:.75rem;color:var(--muted);text-align:center;margin-bottom:12px">✓ Evening check-in complete</div>`:""}
+    ${!S.evening_done?`<button class="btn btn-secondary in" id="btn-evening" style="width:100%;margin-bottom:14px;border-color:rgba(129,140,248,.3)!important;color:var(--accent2)">🌙 End of day</button>`:""}
+    ${!S.evening_done?`<button class="btn btn-secondary in" id="btn-voluntary" style="width:100%;margin-bottom:14px;border-color:rgba(148,163,184,.25)!important;color:var(--subtle);font-size:.82rem">↺ How am I now?</button>`:""}
+    ${S.evening_done?`<div style="font-size:.75rem;color:var(--muted);text-align:center;margin-bottom:12px">✓ End of day complete</div>`:""}
     ${renderWhatNowCard()}
     <div style="margin-bottom:14px" class="in">
       <button id="btn-what-now" style="display:flex;align-items:center;gap:8px;width:100%;padding:10px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;font-size:.82rem;color:var(--subtle);cursor:pointer;justify-content:center">
@@ -3012,8 +3076,7 @@ function renderPlan(){
       </button>
     </div>
     ${renderRecoveryPrompts()}
-    ${renderBedtimeCard()}
-    ${renderMaintenanceSuggestions()}
+    ${renderBedtimeCardCompact()}
     ${shouldShowWakeupCheck()?`<div class="card in" style="margin-bottom:14px;background:rgba(129,140,248,.05);border-color:rgba(129,140,248,.2)">
       <div style="display:flex;align-items:flex-start;gap:10px">
         <span style="font-size:1.1rem">🌅</span>
@@ -3042,7 +3105,7 @@ function renderPlan(){
     </div>`:""}
     ${renderTrendSummary()}
     ${renderActivityLog()}
-    ${supps.length?`<div class="in"><h3 style="margin-bottom:10px">Supplements today</h3>${supps.map(s=>`<div class="card-sm" style="margin-bottom:7px;font-size:.8rem;color:var(--subtle)">${s.trim()}</div>`).join("")}</div>`:""}
+    ${renderSupplementsToday()}
     <div style="margin-top:16px;margin-bottom:8px">
       <button class="btn in" id="btn-panic" style="width:100%;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3)!important;color:var(--red);font-weight:500">🛑 Stop — I need to rest</button>
     </div>
@@ -3501,9 +3564,8 @@ function buildUnscheduledPool(dateStr, gate, placedBlocks){
     });
   });
 
-  // Restorative practices not already placed
+  // Restorative practices — always in pool, multiple per day allowed (Part 7f v10.4)
   RESTORATIVE_PRACTICES.forEach(rp=>{
-    if(placedTitles.has(rp.name))return;
     if(!practiceGateSafe(rp,gate))return;
     const tier=getDefaultTier(rp.name,gate);
     pool.push({
@@ -3610,13 +3672,21 @@ function renderCanvasDayView(dateStr, today, viewToggle){
   const isToday = dateStr===today;
   const gate = isToday ? (S.gate||"green") : "green";
 
-  // Build blocks — always sync rock blocks from EVENTS so Events tab stays in sync with day view
+  // Fix 3: Only rebuild rock blocks from EVENTS when the set of event IDs has changed.
+  // This prevents render() from wiping newly-added pebble/restorative/gap blocks.
   let blocks;
   if(isToday && S.canvas_blocks && S.canvas_blocks.length>0){
-    // Rebuild rock blocks fresh from EVENTS, keep user-arranged pebble/sand/gap/water blocks
-    const freshRocks = buildCanvasBlocksForDate(dateStr).filter(b=>b.layer==="rock");
-    const existingNonRocks = S.canvas_blocks.filter(b=>b.layer!=="rock");
-    blocks = [...freshRocks, ...existingNonRocks];
+    const currentEventIds = new Set(EVENTS.filter(e=>e.date===dateStr).map(e=>String(e.id)));
+    const existingRockEventIds = new Set(S.canvas_blocks.filter(b=>b.event_id).map(b=>String(b.event_id)));
+    const eventsChanged = [...currentEventIds].some(id=>!existingRockEventIds.has(id)) ||
+                         [...existingRockEventIds].some(id=>!currentEventIds.has(id));
+    if(eventsChanged){
+      const freshRocks = buildCanvasBlocksForDate(dateStr).filter(b=>b.layer==="rock");
+      const existingNonRocks = S.canvas_blocks.filter(b=>!b.event_id);
+      blocks = [...freshRocks, ...existingNonRocks];
+    } else {
+      blocks = S.canvas_blocks;
+    }
     S.canvas_blocks = blocks;
   } else {
     blocks = buildCanvasBlocksForDate(dateStr);
@@ -3717,48 +3787,102 @@ function renderCanvasDayView(dateStr, today, viewToggle){
     </div>`;
   };
 
-  // Unscheduled pool
-  const pool = buildUnscheduledPool(dateStr, gate, blocks);
-  const poolHtml = pool.length ? `<div class="card in" style="margin-bottom:12px">
-    <div style="font-size:.76rem;font-weight:500;color:var(--muted);margin-bottom:8px">Unscheduled pool <span style="font-weight:400;font-size:.68rem">— drag into day or tap + to add</span></div>
-    <div style="max-height:200px;overflow-y:auto">
-      ${pool.map(p=>{
-        const allTiers = getAllTiers(p.title);
-        const tierBtns = allTiers.length>1 ? allTiers.map(t=>`<button class="pool-tier-btn" data-pool-id="${p.id}" data-tier-key="${t.key}" data-tier-eu="${t.eu}" data-tier-label="${escH(t.label)}" style="padding:2px 7px;font-size:.62rem;border-radius:5px;cursor:pointer;background:${(S.pool_tier_sel&&S.pool_tier_sel[p.id]===t.key)?layerCol(p.layer,0.3):"var(--bg3)"};border:1px solid ${(S.pool_tier_sel&&S.pool_tier_sel[p.id]===t.key)?layerCol(p.layer,0.6):"var(--border)"}!important;color:${(S.pool_tier_sel&&S.pool_tier_sel[p.id]===t.key)?"var(--text)":"var(--muted)"}">${escH(t.label)} ${t.eu}EU</button>`).join("") : "";
-        const selTier = allTiers.length>1 && S.pool_tier_sel && S.pool_tier_sel[p.id] ? allTiers.find(t=>t.key===(S.pool_tier_sel[p.id])) : null;
-        const displayEu = selTier ? selTier.eu : p.eu_cost;
-        const displayLabel = selTier ? selTier.label : (p.tier_label||LAYERS[p.layer]?.label||"");
-        return `<div class="pool-item" data-pool-id="${p.id}" draggable="true" style="padding:7px 10px;background:${layerCol(p.layer,0.07)};border:1px solid ${layerCol(p.layer,0.2)};border-radius:8px;margin-bottom:5px;cursor:grab">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div style="flex:1;min-width:0">
-              <div style="font-size:.78rem;color:var(--subtle)">${p.restorative?"🌿 ":""}${escH(p.title)}</div>
-              <div style="font-size:.65rem;color:var(--muted)">${displayEu} EU · ${displayLabel}</div>
-              ${p.return_eu?`<div style="font-size:.64rem;color:${layerCol("pebble")}">${p.return_note}</div>`:""}
-            </div>
-            <button class="pool-add" data-pool-id="${p.id}" style="background:var(--accent);border:none;color:#fff;font-size:.8rem;cursor:pointer;padding:4px 10px;border-radius:7px;flex-shrink:0">+</button>
-          </div>
-          ${allTiers.length>1?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${tierBtns}</div>`:""}
-        </div>`;
-      }).join("")}
+  // Part 7a (v10.4): Collapsible pool sections
+  if(!S.pool_section_open) S.pool_section_open={};
+  const POOL_SECTIONS = [
+    {key:"hygiene", label:"Hygiene", filter:p=>["Shower","Hair care","Sponge wash","Brush teeth","Getting dressed"].some(n=>p.title.toLowerCase().includes(n.toLowerCase()))},
+    {key:"movement", label:"Movement & restoration", filter:p=>p.restorative},
+    {key:"meals", label:"Meals", filter:p=>p.title.toLowerCase().includes("meal")||p.title.toLowerCase().includes("breakfast")||p.title.toLowerCase().includes("lunch")||p.title.toLowerCase().includes("dinner")},
+    {key:"cleaning", label:"Cleaning", filter:p=>["dishwash","laundry","cleaning","tidying","vacuum","roomba"].some(kw=>p.title.toLowerCase().includes(kw))},
+    {key:"other", label:"Other", filter:()=>true},
+  ];
+  // Assign each pool item to first matching section
+  const poolBySec={hygiene:[],movement:[],meals:[],cleaning:[],other:[]};
+  const assigned=new Set();
+  pool.forEach(p=>{
+    for(const sec of POOL_SECTIONS){
+      if(sec.key!=="other"&&sec.filter(p)&&!assigned.has(p.id)){
+        poolBySec[sec.key].push(p);
+        assigned.add(p.id);
+        return;
+      }
+    }
+    if(!assigned.has(p.id)){poolBySec.other.push(p);assigned.add(p.id);}
+  });
+
+  const renderPoolItem = (p) => {
+    const allTiers = getAllTiers(p.title);
+    const tierBtns = allTiers.length>1 ? allTiers.map(t=>`<button class="pool-tier-btn" data-pool-id="${p.id}" data-tier-key="${t.key}" data-tier-eu="${t.eu}" data-tier-label="${escH(t.label)}" style="padding:2px 7px;font-size:.62rem;border-radius:5px;cursor:pointer;background:${(S.pool_tier_sel&&S.pool_tier_sel[p.id]===t.key)?layerCol(p.layer,0.3):"var(--bg3)"};border:1px solid ${(S.pool_tier_sel&&S.pool_tier_sel[p.id]===t.key)?layerCol(p.layer,0.6):"var(--border)"}!important;color:${(S.pool_tier_sel&&S.pool_tier_sel[p.id]===t.key)?"var(--text)":"var(--muted)"}">${escH(t.label)} ${t.eu}EU</button>`).join("") : "";
+    const selTier = allTiers.length>1 && S.pool_tier_sel && S.pool_tier_sel[p.id] ? allTiers.find(t=>t.key===(S.pool_tier_sel[p.id])) : null;
+    const displayEu = selTier ? selTier.eu : p.eu_cost;
+    const displayLabel = selTier ? selTier.label : (p.tier_label||LAYERS[p.layer]?.label||"");
+    return `<div class="pool-item" data-pool-id="${p.id}" draggable="true" style="padding:7px 10px;background:${layerCol(p.layer,0.07)};border:1px solid ${layerCol(p.layer,0.2)};border-radius:8px;margin-bottom:5px;cursor:grab">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.78rem;color:var(--subtle)">${p.restorative?"🌿 ":""}${escH(p.title)}</div>
+          <div style="font-size:.65rem;color:var(--muted)">${displayEu} EU · ${displayLabel}</div>
+          ${p.return_eu?`<div style="font-size:.64rem;color:${layerCol("pebble")}">${p.return_note}</div>`:""}
+        </div>
+        <button class="pool-add" data-pool-id="${p.id}" style="background:var(--accent);border:none;color:#fff;font-size:.8rem;cursor:pointer;padding:4px 10px;border-radius:7px;flex-shrink:0">+</button>
+      </div>
+      ${allTiers.length>1?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${tierBtns}</div>`:""}
+    </div>`;
+  };
+
+  const poolHtml = pool.length ? `<div class="card in" id="canvas-pool-container" style="margin-bottom:12px">
+    <div style="font-size:.76rem;font-weight:500;color:var(--muted);margin-bottom:8px">Pool <span style="font-weight:400;font-size:.68rem">— tap section to expand · + to add</span></div>
+    ${POOL_SECTIONS.map(sec=>{
+      const items=poolBySec[sec.key];
+      if(!items.length) return "";
+      const open=S.pool_section_open[sec.key];
+      return `<div style="margin-bottom:4px">
+        <button class="pool-section-toggle" data-section="${sec.key}" style="display:flex;align-items:center;justify-content:space-between;width:100%;background:var(--bg3);border:1px solid var(--border)!important;border-radius:8px;padding:7px 10px;cursor:pointer;text-align:left;margin-bottom:${open?4:0}px">
+          <span style="font-size:.74rem;color:var(--subtle)">${sec.label} <span style="color:var(--muted);font-weight:400">(${items.length})</span></span>
+          <span style="color:var(--muted);font-size:.7rem">${open?"▲":"▼"}</span>
+        </button>
+        ${open?`<div class="pool-section-items">${items.map(p=>renderPoolItem(p)).join("")}</div>`:""}
+      </div>`;
+    }).join("")}
+  </div>` : "";
+
+  // Fix 1 (v10.4): Unified list — sorted by start_time ascending (nulls last)
+  const unifiedBlocks = [...blocks].sort((a,b)=>{
+    if(a.start_time&&b.start_time)return a.start_time.localeCompare(b.start_time);
+    if(a.start_time)return -1;
+    if(b.start_time)return 1;
+    return 0;
+  });
+  const timedSection = ""; // removed — unified list only
+  const untimedSection = ""; // removed — unified list only
+  const unifiedList = unifiedBlocks.length ? `<div class="in" style="margin-bottom:10px">
+    <div style="font-size:.72rem;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;display:flex;justify-content:space-between">
+      <span>Today</span><span style="font-size:.6rem;font-weight:400;color:var(--border)">tap to edit · drag to reorder</span>
     </div>
+    ${unifiedBlocks.map(b=>blockHtml(b)).join("")}
   </div>` : "";
 
-  // Timed blocks section (if any have start_time)
-  const timedSection = timed.length ? `<div class="in" style="margin-bottom:10px">
-    <div style="font-size:.72rem;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Scheduled</div>
-    ${timed.map(b=>blockHtml(b)).join("")}
-  </div>` : "";
-
-  const untimedSection = untimed.length ? `<div class="in" style="margin-bottom:10px">
-    <div style="font-size:.72rem;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Unscheduled for today</div>
-    ${untimed.map(b=>blockHtml(b)).join("")}
-  </div>` : "";
-
-  // Water note + add rest gap
+  // Water note + add buttons (always available regardless of EU)
   const waterNote = `<div class="in" style="margin-bottom:12px;display:flex;flex-direction:column;gap:6px">
     <button id="canvas-add-rest-gap" style="background:rgba(147,197,253,.07);border:1px dashed rgba(147,197,253,.3)!important;border-radius:10px;width:100%;padding:8px;font-size:.74rem;color:var(--accent);cursor:pointer">🛋 + Add rest gap</button>
     <button id="canvas-add-water" style="background:none;border:1px dashed var(--border)!important;border-radius:10px;width:100%;padding:8px;font-size:.74rem;color:var(--muted);cursor:pointer">+ Log something that happened (water layer)</button>
   </div>`;
+
+  // Part 5a (v10.4): Today's activity log — collapsible section at bottom of day view
+  const logEntries = (S.activity_log||[]);
+  const logOpen = S.canvas_log_open||false;
+  const todayLog = logEntries.length ? `<div class="card in" style="margin-bottom:12px">
+    <button id="canvas-log-toggle" style="display:flex;align-items:center;justify-content:space-between;width:100%;background:none;border:none;cursor:pointer;padding:0;text-align:left">
+      <h3 style="font-size:.82rem">Today's log <span style="font-weight:400;color:var(--muted);font-size:.72rem">(${logEntries.length} done · ${logEntries.reduce((s,a)=>s+(a.eu_cost||0),0)} EU)</span></h3>
+      <span style="color:var(--muted);font-size:.7rem">${logOpen?"▲":"▼"}</span>
+    </button>
+    ${logOpen?`<div style="margin-top:10px">${logEntries.map(a=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)">
+      <div>
+        <div style="font-size:.78rem;color:var(--subtle)">${escH(a.title)}</div>
+        <div style="font-size:.65rem;color:var(--muted)">${a.time} · ${a.eu_cost||0} EU${a.return_eu?" · returns "+a.return_eu+" EU":""}</div>
+      </div>
+      <button class="log-undo" data-log-id="${a.id}" data-block-id="${a.block_id}" data-eu="${a.eu_cost||0}" style="background:none;border:1px solid var(--border)!important;border-radius:6px;color:var(--muted);font-size:.65rem;cursor:pointer;padding:2px 7px">✕ undo</button>
+    </div>`).join("")}</div>`:""}
+  </div>` : "";
 
   return `<div class="section">
     ${viewToggle}
@@ -3766,10 +3890,10 @@ function renderCanvasDayView(dateStr, today, viewToggle){
     ${euBanner}
     ${voluntaryBtn}
     ${legendStrip}
-    ${timedSection}
-    ${untimedSection}
+    ${unifiedList}
     ${poolHtml}
     ${waterNote}
+    ${isToday?todayLog:""}
   </div>`;
 }
 
@@ -4095,7 +4219,7 @@ function renderBedtimeCard(){
   const bedMins=parseInt(b.bedTime.split(":")[0])*60+parseInt(b.bedTime.split(":")[1]);
   const isWinddownSoon=windMins-nowMins<=30&&windMins-nowMins>0;
   const isPastWinddown=nowMins>=windMins;
-  const isPastBed=nowMins>=bedMins;
+  const isPastBed = nowMins>=bedMins && now.getHours()>=20;
 
   const urgencyColor=isPastBed?"var(--red)":isPastWinddown?"var(--yellow)":"var(--accent2)";
   const urgencyIcon=isPastBed?"🔴":isPastWinddown?"🌙":"💤";
@@ -4129,6 +4253,53 @@ function renderBedtimeCard(){
     ${isPastWinddown&&!isPastBed?`<div style="font-size:.8rem;color:var(--yellow);font-weight:500">🌙 Wind-down time — close screens, dim lights, rest</div>`:""}
     ${isPastBed?`<div style="font-size:.8rem;color:var(--red);font-weight:500">🔴 Past target bedtime — rest now</div>`:""}
     ${isWinddownSoon?`<div style="font-size:.8rem;color:var(--accent2)">Wind-down in ${windMins-nowMins} min — start preparing</div>`:""}
+  </div>`;
+}
+
+// ── BEDTIME COMPACT (v10.4 Part 5b) — shows in dashboard, evening only ──
+function renderBedtimeCardCompact(){
+  const now=new Date();
+  const h=now.getHours();
+  // Only show after 18:00 on dashboard
+  if(h<18) return "";
+  const b=calcBedtime();
+  const nowMins=h*60+now.getMinutes();
+  const windMins=parseInt(b.winddownTime.split(":")[0])*60+parseInt(b.winddownTime.split(":")[1]);
+  const bedMins=parseInt(b.bedTime.split(":")[0])*60+parseInt(b.bedTime.split(":")[1]);
+  const isPastWinddown=nowMins>=windMins;
+  const isPastBed=nowMins>=bedMins && h>=20;
+  const urgencyColor=isPastBed?"var(--red)":isPastWinddown?"var(--yellow)":"var(--accent2)";
+  return `<div class="card in" style="margin-bottom:16px;border-color:rgba(129,140,248,.2)" id="bedtime-compact-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" id="bedtime-compact-toggle">
+      <span style="font-size:.82rem;color:var(--subtle)">🌙 Wind down ${b.winddownTime} · Sleep ${b.bedTime} · Wake ${b.wakeTime} · First ${b.commitmentTime}</span>
+      <span style="font-size:.7rem;color:${urgencyColor}">▾</span>
+    </div>
+    ${isPastBed?`<div style="font-size:.8rem;color:var(--red);font-weight:500;margin-top:6px">🔴 Past target bedtime — rest now</div>`:""}
+    ${isPastWinddown&&!isPastBed?`<div style="font-size:.8rem;color:var(--yellow);margin-top:6px">🌙 Wind-down time — close screens, dim lights</div>`:""}
+  </div>`;
+}
+
+// ── SUPPLEMENTS TODAY (v10.4 Part 4e) ─────────────────────────
+function renderSupplementsToday(){
+  const supps = (PROFILE&&PROFILE.supplements||"").split("\n").filter(s=>s.trim()).slice(0,12);
+  if(!supps.length) return "";
+  const today=todayStr();
+  const logged = (S.supplement_log&&S.supplement_log[today]) || {};
+  return `<div class="in" style="margin-bottom:16px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>Supplements today</h3>
+      <button id="btn-edit-supplements" style="background:none;border:none;color:var(--muted);font-size:.8rem;cursor:pointer">✏️</button>
+    </div>
+    ${supps.map((s,i)=>{
+      const name=s.trim();
+      const key="supp_"+i+"_"+name.replace(/\s+/g,"_").slice(0,20);
+      const done=!!logged[key];
+      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)" class="supp-row" data-supp-key="${key}" data-supp-name="${escH(name)}">
+        <div style="width:20px;height:20px;border-radius:50%;border:2px solid ${done?"var(--green)":"var(--border)"};background:${done?"var(--green)":"transparent"};cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0" class="supp-tick" data-supp-key="${key}" data-supp-name="${escH(name)}">${done?`<span style="color:#fff;font-size:.6rem">✓</span>`:""}</div>
+        <span style="font-size:.8rem;color:${done?"var(--muted)":"var(--subtle)"};${done?"text-decoration:line-through":""}">${escH(name)}</span>
+        ${done?`<span style="font-size:.65rem;color:var(--muted);margin-left:auto">${logged[key].time||""}</span>`:""}
+      </div>`;
+    }).join("")}
   </div>`;
 }
 
@@ -4981,12 +5152,15 @@ function renderCrash(){
 function renderEventSheet(){
   const ev=S.event_edit||{};
   const isEdit=!!ev.id;
-  const tier=ev.eu_cost?getEventTier(ev.eu_cost):{buffer:2,recovery:1};
-  const phase=ev.date?calcPhaseForDate(ev.date):null;
+  // Fix 4: merge draft over ev so field values survive re-renders
+  const draft = S.event_sheet_draft||{};
+  const d = {...ev, ...draft};
+  const tier=d.eu_cost?getEventTier(d.eu_cost):{buffer:2,recovery:1};
+  const phase=d.date?calcPhaseForDate(d.date):null;
   const lateL=phase==="Late luteal";
-  const tierObj=ev.eu_cost?getEventTier(ev.eu_cost):null;
+  const tierObj=d.eu_cost?getEventTier(d.eu_cost):null;
 
-  const typeOpts=Object.entries(EVENT_TYPE_ICONS).map(([k,ic])=>`<button class="tag${(ev.type||"")=== k?" sel":""}" data-type="${k}" style="padding:6px 10px">${ic} ${k}</button>`).join("");
+  const typeOpts=Object.entries(EVENT_TYPE_ICONS).map(([k,ic])=>`<button class="tag${(d.type||"")=== k?" sel":""}" data-type="${k}" style="padding:6px 10px">${ic} ${k}</button>`).join("");
 
   return `<div class="sheet-overlay" id="event-sheet-overlay">
     <div class="sheet">
@@ -4996,40 +5170,42 @@ function renderEventSheet(){
         <button id="close-event-sheet" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
       </div>
       <div class="field"><label class="field-label">Title</label>
-        <input type="text" id="ev-title" class="text-in" style="width:100%" value="${ev.title||""}" placeholder="e.g. Rheumatology appointment"/></div>
+        <input type="text" id="ev-title" class="text-in" style="width:100%" value="${d.title||""}" placeholder="e.g. Rheumatology appointment"/></div>
       <div style="display:flex;gap:10px">
         <div class="field" style="flex:1"><label class="field-label">Date</label>
-          <input type="date" id="ev-date" class="text-in" style="width:100%" value="${ev.date||""}"/></div>
+          <input type="date" id="ev-date" class="text-in" style="width:100%" value="${d.date||""}"/></div>
       </div>
       <div style="display:flex;gap:10px">
         <div class="field" style="flex:1"><label class="field-label">Start time</label>
-          <input type="time" id="ev-time" class="text-in" style="width:100%" value="${ev.start_time||""}"/></div>
+          <input type="time" id="ev-time" class="text-in" style="width:100%" value="${d.start_time||""}"/></div>
         <div class="field" style="flex:1"><label class="field-label">End time <span style="color:var(--muted);font-weight:300">(optional)</span></label>
-          <input type="time" id="ev-end-time" class="text-in" style="width:100%" value="${ev.end_time||""}"/></div>
+          <input type="time" id="ev-end-time" class="text-in" style="width:100%" value="${d.end_time||""}"/></div>
       </div>
       <div class="field"><label class="field-label">Location <span style="color:var(--muted);font-weight:300">(optional)</span></label>
-        <input type="text" id="ev-location" class="text-in" style="width:100%" value="${ev.location||""}" placeholder="e.g. Auckland Hospital, Level 3"/></div>
+        <input type="text" id="ev-location" class="text-in" style="width:100%" value="${d.location||""}" placeholder="e.g. Auckland Hospital, Level 3"/></div>
       <div class="field"><label class="field-label">Type</label>
         <div class="tags" id="ev-type-tags">${typeOpts}</div></div>
+      ${aiEnabled()?`<div class="field"><button id="ev-ai-estimate" style="width:100%;background:rgba(129,140,248,.07);border:1px solid rgba(129,140,248,.25)!important;border-radius:8px;padding:8px;font-size:.78rem;color:var(--accent2);cursor:pointer">🤖 Estimate EU from title + type</button></div>`:""}
       <div class="field"><label class="field-label">EU cost <span style="color:var(--muted);font-weight:300">(estimated energy this will use)</span></label>
         <div style="display:flex;gap:8px;align-items:center">
-          <input type="number" id="ev-eu" class="text-in" style="width:80px" value="${ev.eu_cost||""}" placeholder="5"/>
+          <input type="number" id="ev-eu" class="text-in" style="width:80px" value="${d.eu_cost||""}" placeholder="5"/>
+          <span style="font-size:.68rem;color:var(--muted)">Quick fill from preset:</span>
           ${["Medical local →5","Travel →12","Social →4","Work →6"].map(s=>{const[l,v]=s.split("→");return `<button class="ev-eu-preset" data-val="${v}" style="background:var(--bg3);border:1px solid var(--border)!important;color:var(--muted);font-size:.7rem;padding:4px 8px;border-radius:6px;cursor:pointer">${l}</button>`;}).join("")}
         </div>
         ${tierObj?`<div style="margin-top:6px;font-size:.72rem;color:var(--muted)">Tier: ${tierObj.name} · Auto buffer: ${tierObj.buffer} EU · Recovery: ${tierObj.recovery}d</div>`:""}
       </div>
       <div style="display:flex;gap:10px">
         <div class="field" style="flex:1"><label class="field-label">Buffer EU</label>
-          <input type="number" id="ev-buffer" class="text-in" style="width:100%" value="${ev.buffer_eu!==undefined?ev.buffer_eu:tier.buffer}"/></div>
+          <input type="number" id="ev-buffer" class="text-in" style="width:100%" value="${d.buffer_eu!==undefined?d.buffer_eu:tier.buffer}"/></div>
         <div class="field" style="flex:1"><label class="field-label">Recovery days</label>
-          <input type="number" id="ev-recovery" class="text-in" style="width:100%" value="${ev.recovery_days!==undefined?ev.recovery_days:tier.recovery}"/></div>
+          <input type="number" id="ev-recovery" class="text-in" style="width:100%" value="${d.recovery_days!==undefined?d.recovery_days:tier.recovery}"/></div>
       </div>
       <div class="field"><label class="field-label">Notes (optional)</label>
-        <textarea id="ev-notes" class="text-in" style="width:100%;min-height:60px">${ev.notes||""}</textarea></div>
+        <textarea id="ev-notes" class="text-in" style="width:100%;min-height:60px">${d.notes||""}</textarea></div>
       <div class="field">
         <label class="field-label">Spread cost over multiple days <span style="color:var(--muted);font-weight:300">(optional)</span></label>
         <div style="display:flex;align-items:center;gap:10px">
-          <input type="number" id="ev-spread" class="text-in" style="width:60px" value="${ev.spread_days||1}" min="1" max="14" placeholder="1"/>
+          <input type="number" id="ev-spread" class="text-in" style="width:60px" value="${d.spread_days||1}" min="1" max="14" placeholder="1"/>
           <span style="color:var(--muted);font-size:.8rem">days — EU divided evenly from event date</span>
         </div>
         <p style="font-size:.68rem;color:var(--muted);margin-top:3px">e.g. dog-sitting trip: set to 2 to spread departure + away-night cost across both days</p>
@@ -5041,6 +5217,60 @@ function renderEventSheet(){
 }
 
 // ── POOL VARIANT PICKER SHEET (v10.3 Feature 10) ──────────────
+// ── BLOCK EDIT SHEET (v10.4 Fix 2) ───────────────
+function renderBlockEditSheet(){
+  const b = S.block_edit;
+  if(!b) return "";
+  const layerOrder = ["rock","pebble","sand","gap","water"];
+  const layerOpts = layerOrder.map(l=>`<option value="${l}" ${b.layer===l?"selected":""}>${(LAYERS[l]||{}).label||l}</option>`).join("");
+  return `<div class="sheet-overlay" id="block-edit-overlay">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="font-size:1rem">Edit block</h2>
+        <button id="close-block-edit" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">x</button>
+      </div>
+      <div class="field"><label class="field-label">Title</label>
+        <input type="text" id="be-title" class="text-in" style="width:100%" value="${escH(b.title||'')}"/></div>
+      <div style="display:flex;gap:10px">
+        <div class="field" style="flex:1"><label class="field-label">Start time</label>
+          <input type="time" id="be-time" class="text-in" style="width:100%" value="${b.start_time||''}" /></div>
+        <div class="field" style="flex:1"><label class="field-label">EU cost</label>
+          <input type="number" id="be-eu" class="text-in" style="width:100%" value="${b.eu_cost||0}" min="0" max="20" step="0.5"/></div>
+      </div>
+      <div class="field"><label class="field-label">Layer</label>
+        <select id="be-layer" class="text-in" style="width:100%">${layerOpts}</select></div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button id="save-block-edit" class="btn btn-primary" style="flex:1">Save</button>
+        <button id="delete-block-edit" class="btn btn-secondary" style="padding:10px 16px;color:var(--red)!important">Remove</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindBlockEditSheet(){
+  if(!S.show_block_edit) return;
+  document.getElementById("close-block-edit")?.addEventListener("click",()=>{S.show_block_edit=false;S.block_edit=null;render();});
+  document.getElementById("block-edit-overlay")?.addEventListener("click",e=>{if(e.target.id==="block-edit-overlay"){S.show_block_edit=false;S.block_edit=null;render();}});
+  document.getElementById("save-block-edit")?.addEventListener("click",()=>{
+    const b=S.block_edit; if(!b)return;
+    const title=document.getElementById("be-title")?.value?.trim()||b.title;
+    const start_time=document.getElementById("be-time")?.value||null;
+    const eu_cost=Number(document.getElementById("be-eu")?.value)||0;
+    const layer=document.getElementById("be-layer")?.value||b.layer;
+    S.canvas_blocks=(S.canvas_blocks||[]).map(bl=>bl.id===b.id?{...bl,title,start_time,eu_cost,layer}:bl);
+    S.show_block_edit=false;S.block_edit=null;
+    render();saveCanvasBlocks();
+  });
+  document.getElementById("delete-block-edit")?.addEventListener("click",()=>{
+    const b=S.block_edit; if(!b)return;
+    if(b.layer==="rock"&&!confirm(`Remove "${b.title}"?`))return;
+    S.canvas_blocks=(S.canvas_blocks||[]).filter(bl=>bl.id!==b.id);
+    S.show_block_edit=false;S.block_edit=null;
+    render();saveCanvasBlocks();
+  });
+}
+
 function renderPoolVariantSheet(){
   const item = S.pool_variant_pick;
   if(!item) return "";
@@ -5395,6 +5625,34 @@ function aiEnabled(){
   return localStorage.getItem("pac_ai_enabled")==="true" && !!localStorage.getItem("pac_api_key");
 }
 
+function buildCompanionSystemPrompt(){
+  return `You are the Pacing Arc companion for E. — a person with ME/CFS in Whangārei, Aotearoa New Zealand.
+
+WHO SHE IS:
+E. has ME/CFS. Her energy is limited and carefully managed. She is highly intelligent with a rare cognitive profile: high integrative complexity, strong systems orientation, recursive thinking, high need for cognition. She thinks in structures and layers. Her questions are often multi-variable. Do not oversimplify. Do not gatekeep her requests or filter them through your own judgement about what is feasible.
+
+HOW TO BE WITH HER:
+Warm, direct, grounding. Short responses unless she asks for more. No hedging. No bullet spam. No unnecessary caveats. Write like a person, not a system. If it's late and she seems tired, name it gently once.
+
+WELLBEING FRAMEWORK — TE WHARE TAPA WHĀ:
+She uses this as her lens. All four walls plus whenua matter equally.
+- Taha tinana: body fit for purpose for what SHE wants to do — write, create, connect, care for her dog, get to class. Not a generic health standard.
+- Taha hinengaro: clarity of thought, not intelligence. Ask: is her thinking clear right now?
+- Taha wairua: what lifts her spirit — changing broken systems, making things better. When low it looks like flatness or disconnection from purpose, not sadness.
+- Taha whānau: enduring relationships, genuine belonging. She deeply wants people who engage with how her mind works.
+- Whenua: environment runs through all walls. Northland/Tūtūkaka coast is woven into her wellbeing. The Māramataka connects lunar cycles to appropriate activity.
+
+DISSOCIATION PATTERN (hold carefully):
+Her cognition can run at full capacity while her body quietly deteriorates. She won't always notice. If she's been in deep cognitive work for a long time, gently surface the physical dimension once. If she dismisses it, move on.
+
+KNOWN ISSUES AND WORKAROUNDS (v10.4):
+- Tap-to-edit chips now working via inline edit sheet
+- Sync may lag on phone → pull down to refresh or close and reopen the app
+- EU budget locked out at 0 → use "+ Log something" water layer button which is always available
+
+Current app version: v10.4`;
+}
+
 function buildCompanionContext(){
   const ci = S.ci||{};
   const today = todayStr();
@@ -5403,16 +5661,17 @@ function buildCompanionContext(){
     const d=new Date(e.date+"T12:00"), t=new Date(today+"T12:00");
     return Math.abs((d-t)/(86400000))<=7;
   }).map(e=>`${e.date}: ${e.title} (${e.eu_cost}EU)`).join(", ");
-  const recentCI = (S.history||[]).slice(-7).map(h=>`${h.date}: gate=${h.gate||"?"} sleep=${h.sleep_score||"?"} BB=${h.battery||"?"}`).join("; ");
+  const recentCI = (S.history||[]).slice(-7).map(h=>`${h.date}: traffic_light=${h.gate||"?"} sleep=${h.sleep_score||"?"} BB=${h.battery||"?"}`).join("; ");
   const garminNote = (typeof garminCalibrationNote==="function") ? (garminCalibrationNote(ci)||"none") : "none";
   return `Today: ${today} | Phase: ${phase}
-Gate: ${S.gate||"?"} | EU budget: ${S.eu_budget||"?"} | EU used: ${S.eu_used||0}
+Traffic light: ${gateLabel(S.gate||"green")} | EU budget: ${S.eu_budget||"?"} | EU used: ${S.eu_used||0}
 BB this morning: ${ci.battery||"?"} | HRV: ${ci.hrv||"?"} | Energy: ${ci.energy||"?"}
 Garmin calibration: ${garminNote}
 Events this week: ${events7||"none"}
 Recent check-ins: ${recentCI||"none"}
-Friction log: ${(S.ai_friction_log||[]).map(f=>f.text).join(" | ")||"none"}`;
+Friction log: ${(S.ai_friction_log||[]).map(f=>typeof f==="string"?f:f.text||JSON.stringify(f)).join(" | ")||"none"}`;
 }
+
 
 async function callCompanionAPI(messages, systemPrompt){
   const apiKey = localStorage.getItem("pac_api_key");
@@ -5423,7 +5682,7 @@ async function callCompanionAPI(messages, systemPrompt){
     body:JSON.stringify({
       model:"claude-sonnet-4-20250514",
       max_tokens:1000,
-      system: systemPrompt||"You are the Pacing Arc AI companion, helping someone with ME/CFS manage their energy. Be warm, concise, grounding. No bullet spam. Plain language.",
+      system: systemPrompt||buildCompanionSystemPrompt(),
       messages
     })
   });
@@ -5477,6 +5736,16 @@ function bindCompanionPanel(){
   document.getElementById("close-companion")?.addEventListener("click",()=>{S.ai_companion_open=false;render();});
   document.getElementById("companion-overlay")?.addEventListener("click",e=>{if(e.target.id==="companion-overlay"){S.ai_companion_open=false;render();}});
 
+  async function saveCompanionState(){
+    try{
+      await sbUpsert("pacing_arc",{
+        device_id:DEVICE_ID(), date:"companion",
+        companion_state:{friction_log:S.ai_friction_log||[],messages:(S.ai_messages||[]).slice(-20)},
+        updated_at:new Date().toISOString()
+      });
+    }catch{}
+  }
+
   async function sendMsg(text){
     if(!text?.trim())return;
     if(!aiEnabled()){showToast("Add API key in Settings → AI companion","red");return;}
@@ -5484,13 +5753,14 @@ function bindCompanionPanel(){
     S.ai_thinking=true; render();
     try{
       const ctx=buildCompanionContext();
-      const sysPrompt=`You are the Pacing Arc AI companion helping someone with ME/CFS manage their energy. Be warm, direct, grounding. Short responses (2-4 sentences max unless asked for more). No unnecessary hedging.\n\nCurrent context:\n${ctx}`;
+      const sysPrompt=buildCompanionSystemPrompt()+"\n\nCurrent context:\n"+ctx;
       const reply=await callCompanionAPI(S.ai_messages.slice(-10).map(m=>({role:m.role,content:m.content})),sysPrompt);
       S.ai_messages=[...S.ai_messages,{role:"assistant",content:reply}];
     }catch(e){
       S.ai_messages=[...S.ai_messages,{role:"assistant",content:"⚠ "+e.message}];
     }
     S.ai_thinking=false; render();
+    saveCompanionState();
     setTimeout(()=>{const el=document.getElementById("companion-msgs");if(el)el.scrollTop=el.scrollHeight;},50);
   }
 
@@ -5512,8 +5782,23 @@ function bindCompanionPanel(){
     if(action==="friction"){
       const text=prompt("What's causing friction or feels wrong?");
       if(!text)return;
-      S.ai_friction_log=[...(S.ai_friction_log||[]),{text,ts:Date.now()}];
-      showToast("✓ Friction logged","green"); render(); return;
+      // v10.4 Part 9c: detect tech issues and gather triage info
+      const techKeywords=["not working","broken","won't","can't","sync","disappeared","error","doesn't","didn't","lost","wrong","missing"];
+      const isTech=techKeywords.some(kw=>text.toLowerCase().includes(kw));
+      if(isTech){
+        const device=prompt("Which device? (Phone / Laptop / Both)")?.trim()||"unknown";
+        const context=prompt("What were you doing?")?.trim()||"";
+        const ongoing=confirm("Is this still happening now?")?"Yes":"No";
+        const entry={type:"tech",description:text,device,context,ongoing,ts:Date.now()};
+        S.ai_friction_log=[...(S.ai_friction_log||[]),entry];
+        showToast("✓ Tech issue logged — structured for debugging","green");
+      } else {
+        S.ai_friction_log=[...(S.ai_friction_log||[]),{text,ts:Date.now()}];
+        showToast("✓ Friction logged","green");
+      }
+      render();
+      saveCompanionState();
+      return;
     }
     if(action==="briefing"){
       sendMsg("Give me a morning briefing based on today's data. What does today look like, what are the key risks, and what should I watch for?");
@@ -5778,7 +6063,7 @@ function renderSettings(){
 
       <h3 style="margin-bottom:12px;margin-top:24px">Notifications</h3>
       ${notifOn?`<div style="font-size:.78rem;color:var(--green);margin-bottom:12px">✓ Notifications enabled</div>
-        <div class="field"><label class="field-label">Morning check-in reminder</label>
+        <div class="field"><label class="field-label">Start of day reminder</label>
           <input type="time" id="s-notif-morning" class="text-in" style="width:120px" value="${notifSettings.morning_time||'08:00'}"/></div>
         <div class="field"><label class="field-label">Evening check-in reminder</label>
           <input type="time" id="s-notif-evening" class="text-in" style="width:120px" value="${notifSettings.evening_time||'18:00'}"/></div>
@@ -6029,7 +6314,31 @@ function bindMain(){
   // Block done toggle
   document.querySelectorAll(".canvas-block-done").forEach(btn=>btn.addEventListener("click",()=>{
     const id=btn.dataset.id;
-    S.canvas_blocks=S.canvas_blocks.map(b=>b.id===id?{...b,done:!b.done}:b);
+    S.canvas_blocks=S.canvas_blocks.map(b=>{
+      if(b.id!==id) return b;
+      const nowDone=!b.done;
+      // Part 5a: feed into activity log
+      if(!S.activity_log) S.activity_log=[];
+      if(nowDone){
+        const now=new Date();
+        S.activity_log=[...S.activity_log,{
+          id:"al_"+id+"_"+Date.now(),
+          block_id:id,
+          title:b.title,
+          eu_cost:b.eu_cost||0,
+          return_eu:b.return_eu||0,
+          layer:b.layer,
+          time:`${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`,
+          ts:Date.now()
+        }];
+        S.eu_used=Math.max(0,(S.eu_used||0)+(b.eu_cost||0));
+      } else {
+        // Untick: remove activity log entry and refund EU
+        S.activity_log=S.activity_log.filter(a=>a.block_id!==id);
+        S.eu_used=Math.max(0,(S.eu_used||0)-(b.eu_cost||0));
+      }
+      return {...b,done:nowDone};
+    });
     render(); saveCanvasBlocks();
   }));
 
@@ -6057,6 +6366,23 @@ function bindMain(){
   }));
 
   // Pool tier selection
+  // Part 7a: pool section toggles (collapsed by default, state persists)
+  document.querySelectorAll(".pool-section-toggle").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      const sec=btn.dataset.section;
+      if(!S.pool_section_open) S.pool_section_open={};
+      const container=document.getElementById("canvas-pool-container");
+      const scrollTop=container?.scrollTop||0;
+      S.pool_section_open[sec]=!S.pool_section_open[sec];
+      render();
+      // Restore scroll position after render
+      requestAnimationFrame(()=>{
+        const c2=document.getElementById("canvas-pool-container");
+        if(c2) c2.scrollTop=scrollTop;
+      });
+    });
+  });
+
   document.querySelectorAll(".pool-tier-btn").forEach(btn=>btn.addEventListener("click",e=>{
     e.stopPropagation();
     const poolId=btn.dataset.poolId;
@@ -6131,6 +6457,42 @@ function bindMain(){
 
   // Feature 3 (v10.2): tap event chip in week view → open event edit sheet
   // Uses click + small drag threshold to distinguish tap from drag
+  // Fix 2 (v10.4): tap canvas block in day view → edit sheet
+  document.querySelectorAll(".canvas-block[data-block-id]").forEach(el=>{
+    let _tapX=0,_tapY=0,_tapMoved=false;
+    el.addEventListener("mousedown",e=>{_tapX=e.clientX;_tapY=e.clientY;_tapMoved=false;});
+    el.addEventListener("mousemove",e=>{if(Math.abs(e.clientX-_tapX)>5||Math.abs(e.clientY-_tapY)>5)_tapMoved=true;});
+    el.addEventListener("click",e=>{
+      // Don't trigger on button clicks inside the block
+      if(e.target.closest("button"))return;
+      if(_tapMoved)return;
+      const id=el.dataset.blockId;
+      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
+      if(!block)return;
+      // Rock block with event_id → open event edit sheet
+      if(block.layer==="rock" && block.event_id){
+        const ev=EVENTS.find(e=>String(e.id)===String(block.event_id));
+        if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+      }
+      // All other blocks → inline block edit sheet
+      S.block_edit={...block};S.show_block_edit=true;render();
+    });
+    el.addEventListener("touchstart",e=>{_tapX=e.touches[0].clientX;_tapY=e.touches[0].clientY;_tapMoved=false;},{passive:true});
+    el.addEventListener("touchmove",e=>{if(Math.abs(e.touches[0].clientX-_tapX)>8||Math.abs(e.touches[0].clientY-_tapY)>8)_tapMoved=true;},{passive:true});
+    el.addEventListener("touchend",e=>{
+      if(e.target.closest("button"))return;
+      if(_tapMoved)return;
+      const id=el.dataset.blockId;
+      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
+      if(!block)return;
+      if(block.layer==="rock"&&block.event_id){
+        const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
+        if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+      }
+      S.block_edit={...block};S.show_block_edit=true;render();
+    });
+  });
+
   document.querySelectorAll(".canvas-week-chip-edit").forEach(chip=>{
     let _tapStartX=0, _tapStartY=0, _tapMoved=false;
     chip.addEventListener("mousedown",e=>{_tapStartX=e.clientX;_tapStartY=e.clientY;_tapMoved=false;});
@@ -6802,6 +7164,23 @@ Mood preference: ${S.meal_mood} food today.` : "");
   // v8.2 — activity log toggle
   document.getElementById("toggle-activity-log")?.addEventListener("click",()=>{S.show_activity_log=!S.show_activity_log;render();});
 
+  // Part 5a: canvas day view log toggle + undo
+  document.getElementById("canvas-log-toggle")?.addEventListener("click",()=>{S.canvas_log_open=!S.canvas_log_open;render();});
+  document.querySelectorAll(".log-undo").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      const logId=btn.dataset.logId;
+      const blockId=btn.dataset.blockId;
+      const eu=Number(btn.dataset.eu||0);
+      S.activity_log=(S.activity_log||[]).filter(a=>a.id!==logId);
+      S.eu_used=Math.max(0,(S.eu_used||0)-eu);
+      // Also mark the block as undone
+      if(blockId && S.canvas_blocks){
+        S.canvas_blocks=S.canvas_blocks.map(b=>b.id===blockId?{...b,done:false}:b);
+      }
+      render(); saveCanvasBlocks();
+    });
+  });
+
   // v8.2 — micro-actions
   document.querySelectorAll(".micro-action-btn").forEach(b=>b.addEventListener("click",()=>{
     const cost=Number(b.dataset.cost);
@@ -6858,6 +7237,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
 
   // Mid-day
   document.getElementById("btn-midday")?.addEventListener("click",()=>{S.show_midday=true;S.midday_step=0;S.midday_data={};render();});
+  document.getElementById("btn-how-am-i")?.addEventListener("click",()=>{S.show_voluntary=true;S.voluntary_step=0;S.voluntary_data={battery:S.ci?.battery??50,energy:S.ci?.energy??5};render();});
 
   // v6.0 — anchor prompt responses
   document.getElementById("btn-anchor-ok")?.addEventListener("click",()=>{
@@ -6875,8 +7255,8 @@ Mood preference: ${S.meal_mood} food today.` : "");
 
   // Event sheet
   document.getElementById("btn-add-event")?.addEventListener("click",()=>{S.show_event_sheet=true;S.event_edit={};render();});
-  document.getElementById("close-event-sheet")?.addEventListener("click",()=>{S.show_event_sheet=false;S.event_edit=null;render();});
-  document.getElementById("event-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="event-sheet-overlay"){S.show_event_sheet=false;S.event_edit=null;render();}});
+  document.getElementById("close-event-sheet")?.addEventListener("click",()=>{S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;render();});
+  document.getElementById("event-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="event-sheet-overlay"){S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;render();}});
   bindEventSheet();
 
   // Edit/delete events
@@ -7061,6 +7441,25 @@ Mood preference: ${S.meal_mood} food today.` : "");
 
   // Panic button
   document.querySelectorAll("#btn-panic").forEach(b=>b.addEventListener("click",()=>{S.show_panic=true;S.panic_step=0;S.panic_data={};render();}));
+
+  // v10.4 Part 4a: modifier pill taps → show tooltip
+  document.querySelectorAll(".modifier-pill").forEach(pill=>{
+    pill.addEventListener("click",()=>{
+      const tipsEl=document.getElementById("modifier-pill-tips");
+      if(!tipsEl) return;
+      // Re-render pills to get tips array
+      const existing=tipsEl.getAttribute("data-active-idx");
+      const idx=pill.dataset.pillIdx;
+      if(existing===idx){tipsEl.style.display="none";tipsEl.removeAttribute("data-active-idx");return;}
+      // Get tip text from title-like attribute — stored in aria-label
+      const label=pill.querySelector("span:last-child")?.textContent||"";
+      // Match tip from pills array by re-running renderModifierPills logic
+      tipsEl.style.display="block";
+      tipsEl.setAttribute("data-active-idx",idx);
+      tipsEl.style.cssText="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:.76rem;color:var(--subtle);margin-bottom:12px;margin-left:16px;margin-right:16px;line-height:1.6";
+      tipsEl.textContent=pill.title||label;
+    });
+  });
   document.getElementById("panic-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="panic-sheet-overlay"){S.show_panic=false;render();}});
   bindPanicSheet();
 
@@ -7070,15 +7469,59 @@ Mood preference: ${S.meal_mood} food today.` : "");
   // Morning brief dismiss
   document.getElementById("dismiss-morning-brief")?.addEventListener("click",()=>{S.ai_morning_brief=null;render();});
 
+  // v10.4 Part 4e: supplement ticking
+  document.querySelectorAll(".supp-tick").forEach(el=>{
+    el.addEventListener("click",()=>{
+      const key=el.dataset.suppKey;
+      const name=el.dataset.suppName;
+      const today=todayStr();
+      if(!S.supplement_log) S.supplement_log={};
+      if(!S.supplement_log[today]) S.supplement_log[today]={};
+      if(S.supplement_log[today][key]){
+        delete S.supplement_log[today][key];
+      } else {
+        const now=new Date();
+        S.supplement_log[today][key]={name,time:`${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`};
+      }
+      render();
+      saveToday({supplement_log:S.supplement_log});
+    });
+  });
+
   // AI companion FAB
   document.getElementById("companion-fab")?.addEventListener("click",()=>{S.ai_companion_open=true;render();});
   bindPoolVariantSheet(); // v10.3
+  bindBlockEditSheet(); // v10.4 Fix 2
+  bindBlockEditSheet();   // v10.4 Fix 2
   bindCompanionPanel();
 }
 
 function bindEventSheet(){
   if(!S.show_event_sheet)return;
   const ev=S.event_edit||{};
+
+  // Fix 4: save all fields to S.event_sheet_draft on every change to prevent title wipe
+  function saveDraft(){
+    S.event_sheet_draft={
+      title: document.getElementById("ev-title")?.value??S.event_sheet_draft?.title,
+      date: document.getElementById("ev-date")?.value??S.event_sheet_draft?.date,
+      start_time: document.getElementById("ev-time")?.value??S.event_sheet_draft?.start_time,
+      end_time: document.getElementById("ev-end-time")?.value??S.event_sheet_draft?.end_time,
+      location: document.getElementById("ev-location")?.value??S.event_sheet_draft?.location,
+      eu_cost: document.getElementById("ev-eu")?.value!==undefined?Number(document.getElementById("ev-eu").value):S.event_sheet_draft?.eu_cost,
+      buffer_eu: document.getElementById("ev-buffer")?.value!==undefined?Number(document.getElementById("ev-buffer").value):S.event_sheet_draft?.buffer_eu,
+      recovery_days: document.getElementById("ev-recovery")?.value!==undefined?Number(document.getElementById("ev-recovery").value):S.event_sheet_draft?.recovery_days,
+      notes: document.getElementById("ev-notes")?.value??S.event_sheet_draft?.notes,
+      spread_days: document.getElementById("ev-spread")?.value?Number(document.getElementById("ev-spread").value):S.event_sheet_draft?.spread_days,
+      type: S.event_edit?.type||S.event_sheet_draft?.type,
+    };
+  }
+  ["ev-title","ev-date","ev-time","ev-end-time","ev-location","ev-eu","ev-buffer","ev-recovery","ev-notes","ev-spread"].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.addEventListener("input",saveDraft);
+    if(el) el.addEventListener("change",()=>{saveDraft();if(id==="ev-date"||id==="ev-eu")render();});
+  });
+
   // Type tags
   document.querySelectorAll("#ev-type-tags .tag").forEach(b=>b.addEventListener("click",()=>{
     if(!S.event_edit)S.event_edit={};
@@ -7099,6 +7542,47 @@ function bindEventSheet(){
   document.getElementById("ev-date")?.addEventListener("change",e=>{
     if(!S.event_edit)S.event_edit={};
     S.event_edit.date=e.target.value;render();
+  });
+  // Part 8a: AI EU estimation
+  document.getElementById("ev-ai-estimate")?.addEventListener("click",async()=>{
+    if(!aiEnabled()) return;
+    const title=document.getElementById("ev-title")?.value?.trim();
+    const type=(S.event_edit?.type||S.event_sheet_draft?.type||"");
+    const startT=document.getElementById("ev-time")?.value;
+    const endT=document.getElementById("ev-end-time")?.value;
+    let durationNote="";
+    if(startT&&endT){
+      const [sh,sm]=startT.split(":").map(Number);
+      const [eh,em]=endT.split(":").map(Number);
+      const mins=(eh*60+em)-(sh*60+sm);
+      if(mins>0) durationNote=`Duration: ${mins} minutes.`;
+    }
+    const btn=document.getElementById("ev-ai-estimate");
+    if(btn) btn.textContent="⏳ Estimating…";
+    try{
+      const EU_TABLE=`EU reference: Medical local 5·Travel 12·Social 4·Work 6·Phone call 2·Light computer work 2·Appointment (local) 5·Appointment (travel) 8`;
+      const prompt=`Estimate the energy cost (EU) for the following event for a person with ME/CFS. Traffic light: ${gateLabel(S.gate||"green")}.
+Event: "${title||"(no title)"}", Type: ${type||"unspecified"}. ${durationNote}
+${EU_TABLE}
+Return ONLY a JSON object with keys: eu_cost (number), buffer_eu (number, typically 2-4), recovery_days (number, 0-3). No other text.`;
+      const raw=await callCompanionAPI([{role:"user",content:prompt}],"You are an EU cost estimator for ME/CFS pacing. Return only JSON.");
+      const clean=raw.replace(/```json|```/g,"").trim();
+      const est=JSON.parse(clean);
+      if(est.eu_cost){
+        const euIn=document.getElementById("ev-eu");
+        const bufIn=document.getElementById("ev-buffer");
+        const recIn=document.getElementById("ev-recovery");
+        if(euIn) euIn.value=est.eu_cost;
+        if(bufIn) bufIn.value=est.buffer_eu||2;
+        if(recIn) recIn.value=est.recovery_days||1;
+        if(!S.event_edit) S.event_edit={};
+        S.event_edit.eu_cost=est.eu_cost;
+        saveDraft(); render();
+      }
+    }catch(e){
+      showToast("Estimate failed — use presets","red");
+    }
+    if(btn) btn.textContent="🤖 Estimate EU from title + type";
   });
   document.getElementById("save-event")?.addEventListener("click",async()=>{
     const title=document.getElementById("ev-title")?.value?.trim();
@@ -7129,7 +7613,7 @@ function bindEventSheet(){
       EVENTS.push({...localData,id:"tmp_"+Date.now()});
       showToast("Save failed — event stored locally only: "+err.message);
     }
-    S.show_event_sheet=false;S.event_edit=null;render();
+    S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;render();
   });
 }
 
