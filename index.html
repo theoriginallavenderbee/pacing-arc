@@ -499,6 +499,7 @@ const TASK_TIERS_DEFAULT = {
   "Grocery shopping — order submit": { full:{label:"Submit order",eu:1},         reduced:{label:"Submit order",eu:1} },
   "Grocery shopping — click and collect": { full:{label:"Drive + collect",eu:3}, reduced:{label:"Drive + collect",eu:3} },
   "Phone call":         { full:{label:"Full call",eu:2},             reduced:{label:"Voice message only",eu:1} },
+  "Catch up with a friend": { full:{label:"In-person visit",eu:4},  reduced:{label:"Phone or video call",eu:2}, minimal:{label:"Voice note or message exchange",eu:1} },
   // Restorative practices (v8.0)
   "Yoga (full class)":                         { full:{label:"Full class",eu:4},                    reduced:{label:"Restorative poses only",eu:2},     minimal:{label:"Lying breathwork only",eu:1} },
   "Sophrology":                                { full:{label:"Full session",eu:2},                  reduced:{label:"Short session (10 min)",eu:1} },
@@ -3207,7 +3208,7 @@ const LAYERS = {
 // Which tasks are Sand (committed EU necessities)
 const SAND_TASK_NAMES = new Set([
   "Shower","Getting dressed","Meal prep — light","Meal prep — medium",
-  "Meal prep — heavy","Medication prep","Dishwashing block",
+  "Meal prep — heavy","Medication prep",
 ]);
 
 // Default gap block duration (minutes)
@@ -3324,6 +3325,32 @@ function buildUnscheduledPool(dateStr, gate, placedBlocks){
       eu_cost:tier.eu, tier_label:tier.label,
       return_eu:0, return_note:"",
       restorative:false, duration_mins:Math.round(tier.eu*25)||20,
+    });
+  });
+
+  // Due maintenance tasks not already in pool or placed (Fix v10.1 #1)
+  const pebbleTitles = new Set(pool.map(p=>p.title)); // titles already in pool
+  const SAND_MAINTENANCE_IDS = new Set(["shower","meal_prep"]); // skip — already sand blocks
+  getMaintenanceDue().forEach(task=>{
+    if(!task.isDue) return;
+    if(SAND_MAINTENANCE_IDS.has(task.id)) return;
+    // Avoid duplicating tasks already in TASK_TIERS_DEFAULT pool
+    // "Dishes" in maintenance == "Dishwashing block" in task tiers
+    const alreadyInPool = pebbleTitles.has(task.title) ||
+      (task.title==="Dishes" && pebbleTitles.has("Dishwashing block")) ||
+      (task.title==="Dishwashing block" && pebbleTitles.has("Dishes")) ||
+      placedTitles.has(task.title);
+    if(alreadyInPool) return;
+    pool.push({
+      id:"pool_maint_"+task.id,
+      title:task.title,
+      layer:"pebble",
+      eu_cost:task.eu_cost,
+      tier_label:task.isOverdue?"Overdue":"Due today",
+      return_eu:0, return_note:"",
+      restorative:false,
+      duration_mins:Math.round(task.eu_cost*25)||20,
+      maintenance_id:task.id,
     });
   });
 
@@ -3584,11 +3611,19 @@ function renderCanvasDayView(dateStr, today, viewToggle){
 function renderCanvasWeekView(today, viewToggle){
   const days = Array.from({length:7},(_,i)=>dateAddDays(today,i));
   const mods = calcBankingModifiers(EVENTS, today, dateAddDays(today,7));
+  const layerFilter = S.week_layer_filter || "rocks_pebbles"; // "rocks" | "rocks_pebbles" | "all"
 
   const phaseCol = p => p==="Late luteal"?"#f87171":p==="Luteal"?"#fb923c":p==="Ovulation"?"#818cf8":"#34d399";
 
+  const filterToggle = `<div style="display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:10px;flex-shrink:0">
+    ${[["rocks","Rocks only"],["rocks_pebbles","Rocks + pebbles"],["all","All layers"]].map(([v,label])=>`
+      <button class="week-filter-btn" data-filter="${v}" style="flex:1;padding:5px 6px;font-size:.68rem;cursor:pointer;background:${layerFilter===v?"var(--accent)":"var(--bg3)"};color:${layerFilter===v?"#fff":"var(--muted)"};border:none;border-left:${v==="rocks"?"none":"1px solid var(--border)"};font-weight:${layerFilter===v?"500":"400"}">${label}</button>
+    `).join("")}
+  </div>`;
+
   return `<div class="section">
     ${viewToggle}
+    ${filterToggle}
     <p style="font-size:.74rem;color:var(--muted);margin-bottom:12px">Tap any day to open it in day view. Drag activity chips to reschedule.</p>
     ${days.map(d=>{
       const isToday=d===today;
@@ -3599,6 +3634,15 @@ function renderCanvasWeekView(today, viewToggle){
       const bankMod=mods[d]??1.0;
       const dayLabel=new Date(d+"T12:00").toLocaleDateString("en-NZ",{weekday:"short",day:"numeric",month:"short"});
       const isDragOver = S.canvas_week_drag_over===d;
+
+      // Apply layer filter to events shown in week view
+      const filteredEvents = dayEvents.filter(ev=>{
+        const isRp = RESTORATIVE_PRACTICES.some(p=>p.name===ev.title);
+        // All events are rock-layer (appointments + restorative)
+        if(layerFilter==="rocks") return true; // rocks = all events
+        if(layerFilter==="rocks_pebbles") return true; // events are rocks — always show
+        return true; // "all" shows everything
+      });
 
       return `<div class="card canvas-week-day${isDragOver?" drag-over":""}" data-date="${d}"
         style="margin-bottom:8px${isToday?";border-color:var(--accent);border-width:1.5px":""}${overloaded?";background:rgba(248,113,113,.03)":""}${isDragOver?";border-color:var(--green)":""}">
@@ -3616,8 +3660,8 @@ function renderCanvasWeekView(today, viewToggle){
             ${overloaded?`<div style="font-size:.6rem;color:var(--red)">rest-only day</div>`:""}
           </div>
         </div>
-        ${dayEvents.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">
-          ${dayEvents.map(ev=>{
+        ${filteredEvents.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">
+          ${filteredEvents.map(ev=>{
             const isRp=RESTORATIVE_PRACTICES.some(p=>p.name===ev.title);
             return `<div draggable="true" class="canvas-week-block" data-event-id="${ev.id}" data-from-date="${d}"
               style="display:inline-flex;align-items:center;gap:4px;background:${layerCol(isRp?"rock":"rock",0.12)};border:1px solid ${layerCol(isRp?"rock":"rock",0.3)};border-radius:6px;padding:3px 7px;font-size:.7rem;color:var(--subtle);cursor:grab">
@@ -4161,7 +4205,7 @@ function renderMeals(){
                 return `<div class="audit-item" data-id="${item.id}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);gap:8px">
                   <div style="flex:1;min-width:0">
                     <div style="font-size:.82rem;font-weight:500;${isConf?"opacity:.55;text-decoration:line-through":""}">${escH(item.name)} ${urgBadge(item)}</div>
-                    <div style="font-size:.7rem;color:var(--muted);margin-top:1px">${escH(item.quantity||"")}${expiryBit(item)}</div>
+                    <div style="font-size:.7rem;color:var(--muted);margin-top:1px">${escH(item.quantity||"")}${item.unopened_units>0?` · <span style="color:var(--muted)">+${item.unopened_units} unopened</span>`:""}${expiryBit(item)}</div>
                   </div>
                   <div style="display:flex;gap:4px;flex-shrink:0">
                     ${sessionActive ? `<button class="audit-confirm" data-id="${item.id}" style="background:${isConf?"rgba(52,211,153,.2)":"var(--bg3)"};border:1px solid ${isConf?"rgba(52,211,153,.4)":"var(--border)"}!important;color:${isConf?"var(--green)":"var(--muted)"};font-size:.72rem;padding:4px 8px;border-radius:7px;cursor:pointer">${isConf?"✓ here":"confirm"}</button>` : ""}
@@ -4403,6 +4447,12 @@ function renderIngredientSheet(){
         </div>
       </div>
 
+      ${ing.quantity ? `<div class="field">
+        <label class="field-label">Unopened units <span style="color:var(--muted);font-weight:400;font-size:.68rem">optional</span></label>
+        <input type="number" id="ing-unopened" class="text-in" style="width:100%;max-width:120px" value="${ing.unopened_units||""}" min="0" placeholder="0"/>
+        <p style="font-size:.68rem;color:var(--muted);margin-top:3px">e.g. 1 sealed bag in addition to the opened one above</p>
+      </div>` : ""}
+
       <div class="field">
         <label class="field-label">Urgency</label>
         <div style="display:flex;gap:6px">
@@ -4427,6 +4477,7 @@ function renderIngredientSheet(){
         <input type="date" id="ing-origin-date" class="text-in" style="width:100%;font-size:.82rem" value="${escH(currentDate)}"/>
         <p style="font-size:.68rem;color:var(--muted);margin-top:4px">${exTypeHints[exType]}</p>
         ${ing.days_to_expiry!=null ? `<p style="font-size:.72rem;color:${getUrgencyTier(ing)==="urgent"?"var(--red)":getUrgencyTier(ing)==="soon"?"var(--orange)":"var(--muted)"};margin-top:2px">${ing.days_to_expiry} days remaining</p>` : ""}
+        ${isEdit && exType==="opened_on" ? `<button id="mark-as-unopened" style="margin-top:8px;background:none;border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-size:.72rem;color:var(--muted);cursor:pointer">Mark as unopened</button>` : ""}
       </div>
 
       <div style="background:var(--bg3);border-radius:10px;padding:10px 12px;margin-bottom:14px">
@@ -5016,7 +5067,7 @@ function renderEveningSheet(){
   const steps=[
     {id:"rating",q:"How did today go?",type:"choice",opts:["Crashed","Hard","Okay","Good","Better than expected"],cols:["#f87171","#fb923c","#fbbf24","#34d399","#34d399"]},
     {id:"eu_accuracy",q:"Did your EU budget feel right?",type:"choice",opts:["Way too high","A bit high","About right","A bit low","Way too low"],cols:["#818cf8","#64748b","#34d399","#fbbf24","#f87171"]},
-    {id:"symptoms",q:"Any symptoms during the day?",type:"multi",opts:["Brain fog","Muscle pain","Sore throat/flu feeling","Dizziness/orthostatic","Sensory sensitivity","Wired-tired","Headache","Nausea","None"]},
+    {id:"symptoms",q:"Any symptoms during the day?",type:"multi",opts:["Brain fog","Muscle tightness","Muscle pain","Sore throat/flu feeling","Dizziness/orthostatic","Sensory sensitivity","Mild wired-tired","Strongly wired-tired","Headache","Nausea","None"]},
     {id:"feel_vs_morning",q:"How do you feel vs this morning?",type:"choice",opts:["Much worse","Worse","Same","Better","Much better"],cols:["#f87171","#fb923c","#fbbf24","#34d399","#34d399"]},
     // v6.0 — cognitive wall evening questions
     {id:"cognitive_feel",q:"How did your thinking feel today?",hint:"Taha hinengaro — the cognitive wall.",type:"choice",opts:["Hit a wall early","Okay but limited","Held up well","Clear throughout"],cols:["#f87171","#fb923c","#fbbf24","#34d399"]},
@@ -5484,6 +5535,11 @@ function bindMain(){
   document.getElementById("canvas-view-day")?.addEventListener("click",()=>{S.canvas_view="day";render();});
   document.getElementById("canvas-view-week")?.addEventListener("click",()=>{S.canvas_view="week";render();});
 
+  // Week layer filter
+  document.querySelectorAll(".week-filter-btn").forEach(btn=>btn.addEventListener("click",()=>{
+    S.week_layer_filter=btn.dataset.filter;render();
+  }));
+
   // Day nav
   document.getElementById("canvas-prev-day")?.addEventListener("click",()=>{
     S.canvas_date=dateAddDays(S.canvas_date||todayStr(),-1);
@@ -5748,6 +5804,16 @@ function bindMain(){
   // Ingredient sheet
   document.getElementById("close-ing-sheet")?.addEventListener("click",()=>{S.show_add_ingredient=false;S.ingredient_edit=null;render();});
   document.getElementById("ing-sheet-overlay")?.addEventListener("click",e=>{if(e.target.id==="ing-sheet-overlay"){S.show_add_ingredient=false;S.ingredient_edit=null;render();}});
+  document.getElementById("mark-as-unopened")?.addEventListener("click",async()=>{
+    if(!S.ingredient_edit?.id) return;
+    INGREDIENT_INVENTORY = INGREDIENT_INVENTORY.map(i=>i.id===S.ingredient_edit.id
+      ? {...i, expiry_type:null, origin_date:null, expiry_date:null, days_to_expiry:null, urgency:"normal"}
+      : i);
+    await saveMealData();
+    S.ingredient_edit = INGREDIENT_INVENTORY.find(i=>i.id===S.ingredient_edit?.id)||S.ingredient_edit;
+    S.ing_expiry_type="best_before"; S.ing_expiry_type_set=false;
+    render();
+  });
   document.getElementById("save-ingredient")?.addEventListener("click",async()=>{
     const name = document.getElementById("ing-name")?.value?.trim();
     if(!name){alert("Name required.");return;}
@@ -5786,6 +5852,7 @@ function bindMain(){
       category:     document.getElementById("ing-cat")?.value  || inferCategory(name),
       form:         document.getElementById("ing-form")?.value || "fresh",
       quantity:     document.getElementById("ing-qty")?.value  || "",
+      unopened_units: parseInt(document.getElementById("ing-unopened")?.value||"0",10)||0,
       location:     document.getElementById("ing-loc")?.value  || (getPantryLocations()[0]||""),
       expiry_date, days_to_expiry,
       origin_date:  originDateStr||null,
@@ -5904,18 +5971,15 @@ function bindMain(){
   document.getElementById("quickadd-overlay")?.addEventListener("click",e=>{
     if(e.target.id==="quickadd-overlay"){S.show_quick_add=false;S.quick_add_list=[];S.quick_add_search="";S.quick_add_matches=[];S.quick_add_update_mode=null;render();}
   });
-  // Live search as user types
+  // Live search as user types (debounced for iOS Safari keyboard stability)
+  let _qaSearchTimer = null;
   document.getElementById("quick-add-input")?.addEventListener("input",e=>{
     const val=e.target.value?.trim()||"";
-    const caretPos=e.target.selectionStart;
     S.quick_add_search=val;
     S.quick_add_matches=val.length>=2?searchInventory(val):[];
     S.quick_add_update_mode=null;
-    render();
-    requestAnimationFrame(()=>{
-      const inp=document.getElementById("quick-add-input");
-      if(inp){inp.focus();try{inp.setSelectionRange(caretPos,caretPos);}catch(x){}}
-    });
+    clearTimeout(_qaSearchTimer);
+    _qaSearchTimer = setTimeout(()=>{ render(); }, 300);
   });
   document.getElementById("quick-add-input")?.addEventListener("keydown",e=>{
     if(e.key==="Enter"){e.preventDefault();document.getElementById("quick-add-btn")?.click();}
@@ -5999,14 +6063,11 @@ function bindMain(){
   }));
 
   // ── v9.3 — Audit search ───────────────────────
+  let _auditSearchTimer = null;
   document.getElementById("audit-search-input")?.addEventListener("input", e => {
     S.audit_search = e.target.value||"";
-    const caretPos = e.target.selectionStart;
-    render();
-    requestAnimationFrame(()=>{
-      const el = document.getElementById("audit-search-input");
-      if(el){ el.focus(); try{el.setSelectionRange(caretPos,caretPos);}catch(x){} }
-    });
+    clearTimeout(_auditSearchTimer);
+    _auditSearchTimer = setTimeout(()=>{ render(); }, 300);
   });
   document.getElementById("audit-search-clear")?.addEventListener("click", () => {
     S.audit_search=""; render();
