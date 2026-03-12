@@ -5805,6 +5805,16 @@ function renderSettings(){
         <button id="s-switch-device" style="background:var(--bg3);border:1px solid var(--border)!important;color:var(--red);font-size:.75rem;padding:8px 14px;border-radius:8px;cursor:pointer">Switch</button>
       </div>
 
+      <h3 style="margin-bottom:12px;margin-top:8px">AI Companion</h3>
+      <p style="color:var(--muted);font-size:.75rem;margin-bottom:10px">Enter your Anthropic API key to enable the in-app companion. The key is stored only on this device — never sent anywhere except directly to Anthropic.</p>
+      <label style="font-size:.75rem;color:var(--subtle);display:block;margin-bottom:4px">Anthropic API key</label>
+      <input type="password" id="s-api-key" class="text-in" style="width:100%;font-size:.8rem;margin-bottom:10px;font-family:monospace" placeholder="sk-ant-…"/>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <label style="font-size:.75rem;color:var(--subtle)">Enable AI companion</label>
+        <input type="checkbox" id="s-ai-enabled" style="width:18px;height:18px;cursor:pointer"/>
+      </div>
+      <button id="s-save-api" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 18px;cursor:pointer;font-size:.82rem;margin-bottom:20px">Save API settings</button>
+
       <h3 style="margin-bottom:12px;margin-top:8px">Data</h3>
       <button class="btn btn-secondary" id="s-export" style="width:100%;margin-bottom:10px">📤 Export my data (CSV)</button>
       <button class="btn btn-secondary" id="s-reset" style="width:100%;margin-top:4px;color:var(--red)!important">Reset all data</button>
@@ -5881,6 +5891,19 @@ function bindSettings(){
     }
   });
   document.getElementById("s-export")?.addEventListener("click",exportData);
+  // AI companion settings
+  const apiKeyInput = document.getElementById("s-api-key");
+  const aiEnabledCheck = document.getElementById("s-ai-enabled");
+  if(apiKeyInput) apiKeyInput.value = localStorage.getItem("pac_api_key")||"";
+  if(aiEnabledCheck) aiEnabledCheck.checked = localStorage.getItem("pac_ai_enabled")==="true";
+  document.getElementById("s-save-api")?.addEventListener("click",()=>{
+    const key = (apiKeyInput?.value||"").trim();
+    const enabled = aiEnabledCheck?.checked||false;
+    if(key) localStorage.setItem("pac_api_key", key);
+    else localStorage.removeItem("pac_api_key");
+    localStorage.setItem("pac_ai_enabled", enabled?"true":"false");
+    showToast(key?"API key saved ✓":"API key cleared","green");
+  });
   document.getElementById("s-reset")?.addEventListener("click",()=>{
     if(confirm("Reset all local data?")){localStorage.clear();PROFILE=null;S.screen="setup";S.setup_step=0;S.setup_data={};render();}
   });
