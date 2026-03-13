@@ -821,7 +821,7 @@ async function sbInsert(table,data){
     headers:{...SB_HDR,"Prefer":"return=representation"},
     body:JSON.stringify(data)
   });
-  if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbInsert ${table} HTTP ${r.status}: ${err}`);}
+  if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbInsert HTTP ${r.status}: ${err.slice(0,200)}`);}
   const d=await r.json();
   return Array.isArray(d)?d[0]:d;
 }
@@ -3849,8 +3849,7 @@ function renderCanvasDayView(dateStr, today, viewToggle){
     }).join("")}
   </div>` : "";
 
-  // Render in S.canvas_blocks order (user drag order preserved).
-  // Do not re-sort here — sorting destroyed manual drag reorder on every render.
+  // Render in S.canvas_blocks order — drag reorder is preserved.
   const unifiedBlocks = [...blocks];
   const timedSection = ""; // removed — unified list only
   const untimedSection = ""; // removed — unified list only
@@ -4036,7 +4035,7 @@ function renderEvents(){
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
               <div>
                 <span style="font-size:.75rem;color:var(--muted)">${EVENT_TYPE_ICONS[e.type]||"📌"} ${dayOfWeekShort(e.date)}, ${dayOfMonthShort(e.date)}${e.start_time?` · <strong style="color:var(--subtle)">${e.start_time}</strong>`:""}</span>
-                <div style="font-size:.875rem;font-weight:500;margin-top:2px;${e._done_today?'text-decoration:line-through;color:var(--muted)':''}">${e._done_today?'✓ ':''}${e.title}</div>
+                <div style="font-size:.875rem;font-weight:500;margin-top:2px">${e.title}</div>
               </div>
               <div style="display:flex;gap:6px">
                 <button class="btn-edit-event" data-id="${e.id}" style="background:none;border:none;color:var(--muted);font-size:.8rem;cursor:pointer;padding:4px">✏️</button>
@@ -5655,6 +5654,27 @@ KNOWN ISSUES AND WORKAROUNDS (v10.4):
 - Sync may lag on phone → pull down to refresh or close and reopen the app
 - EU budget locked out at 0 → use "+ Log something" water layer button which is always available
 
+APP FEEDBACK TRIAGE — CRITICAL:
+When E. describes anything that sounds like a problem, bug, annoyance, or idea about the app itself, you must triage it before responding to anything else. Do this automatically — she should never have to ask.
+
+Classify it as one of three tiers and say so clearly at the start of your reply:
+
+🗒 LOG — note it, no action needed now
+Use when: cosmetic annoyance, something that feels slightly off, a "this could be better" observation, anything she can live with, or something to revisit later. Add it to S.ai_friction_log silently.
+Example triggers: "the colour is hard to read", "this feels a bit clunky", "I wonder if..."
+
+🔧 FIX — small specific bug, chat session can handle it
+Use when: one specific thing does the wrong thing or nothing, she can describe it as "X does Y when it should do Z", it's contained to one feature.
+Tell her: "This is a Fix — upload your index.html in a new message and I'll patch it."
+Example triggers: "the button doesn't work", "drag reorder resets", "it's not saving"
+
+🏗 PRIME — needs a full architecture session
+Use when: it touches multiple systems, she can't describe it in one sentence, it requires new screens/data/structure, or a previous Fix attempt came back broken.
+Tell her: "This needs a Prime session — start a new Claude chat and paste in the transcript first."
+Example triggers: "I want a whole new section", "the events system keeps breaking", "I need it to work differently"
+
+After triaging, respond normally to whatever else she said. Keep the triage label short — one line is enough. Don't over-explain the tiers unless she asks.
+
 Current app version: v10.4`;
 }
 
@@ -6337,18 +6357,11 @@ function bindMain(){
           ts:Date.now()
         }];
         S.eu_used=Math.max(0,(S.eu_used||0)+(b.eu_cost||0));
-        // Issue 4: reflect done state in EVENTS so Events tab shows completion
-        if(b.event_id){
-          EVENTS=EVENTS.map(ev=>String(ev.id)===String(b.event_id)?{...ev,_done_today:true,_done_time:now.toISOString()}:ev);
-        }
+        if(b.event_id) EVENTS=EVENTS.map(ev=>String(ev.id)===String(b.event_id)?{...ev,_done_today:true}:ev);
       } else {
-        // Untick: remove activity log entry and refund EU
         S.activity_log=S.activity_log.filter(a=>a.block_id!==id);
         S.eu_used=Math.max(0,(S.eu_used||0)-(b.eu_cost||0));
-        // Undo done state in EVENTS
-        if(b.event_id){
-          EVENTS=EVENTS.map(ev=>String(ev.id)===String(b.event_id)?{...ev,_done_today:false,_done_time:null}:ev);
-        }
+        if(b.event_id) EVENTS=EVENTS.map(ev=>String(ev.id)===String(b.event_id)?{...ev,_done_today:false}:ev);
       }
       return {...b,done:nowDone};
     });
@@ -7497,7 +7510,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
         S.supplement_log[today][key]={name,time:`${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`};
       }
       render();
-      syncToday(); // saves supplement_log via sbSaveToday
+      syncToday();
     });
   });
 
