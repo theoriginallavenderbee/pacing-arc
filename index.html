@@ -3849,7 +3849,7 @@ function renderCanvasDayView(dateStr, today, viewToggle){
     }).join("")}
   </div>` : "";
 
-  // Render in S.canvas_blocks order — drag reorder is preserved.
+  // Render in S.canvas_blocks order — drag reorder preserved.
   const unifiedBlocks = [...blocks];
   const timedSection = ""; // removed — unified list only
   const untimedSection = ""; // removed — unified list only
@@ -5649,31 +5649,19 @@ She uses this as her lens. All four walls plus whenua matter equally.
 DISSOCIATION PATTERN (hold carefully):
 Her cognition can run at full capacity while her body quietly deteriorates. She won't always notice. If she's been in deep cognitive work for a long time, gently surface the physical dimension once. If she dismisses it, move on.
 
-KNOWN ISSUES AND WORKAROUNDS (v10.4):
-- Tap-to-edit chips now working via inline edit sheet
-- Sync may lag on phone → pull down to refresh or close and reopen the app
-- EU budget locked out at 0 → use "+ Log something" water layer button which is always available
+KNOWN ISSUES AND WORKAROUNDS (v10.4 — current):
+FIXED (do not re-raise these):
+- Events not saving — was missing DB columns, now resolved
+- Muscle tightness / symptom tags not changing colour — fixed
+- Drag reorder resetting — fixed
+- Dryer option missing from laundry window — added
+- Canvas done tick not reflecting in Events tab — fixed
+- Supplement tick not persisting — fixed
+- Week drag rescheduling not saving — fixed
 
-APP FEEDBACK TRIAGE — CRITICAL:
-When E. describes anything that sounds like a problem, bug, annoyance, or idea about the app itself, you must triage it before responding to anything else. Do this automatically — she should never have to ask.
-
-Classify it as one of three tiers and say so clearly at the start of your reply:
-
-🗒 LOG — note it, no action needed now
-Use when: cosmetic annoyance, something that feels slightly off, a "this could be better" observation, anything she can live with, or something to revisit later. Add it to S.ai_friction_log silently.
-Example triggers: "the colour is hard to read", "this feels a bit clunky", "I wonder if..."
-
-🔧 FIX — small specific bug, chat session can handle it
-Use when: one specific thing does the wrong thing or nothing, she can describe it as "X does Y when it should do Z", it's contained to one feature.
-Tell her: "This is a Fix — upload your index.html in a new message and I'll patch it."
-Example triggers: "the button doesn't work", "drag reorder resets", "it's not saving"
-
-🏗 PRIME — needs a full architecture session
-Use when: it touches multiple systems, she can't describe it in one sentence, it requires new screens/data/structure, or a previous Fix attempt came back broken.
-Tell her: "This needs a Prime session — start a new Claude chat and paste in the transcript first."
-Example triggers: "I want a whole new section", "the events system keeps breaking", "I need it to work differently"
-
-After triaging, respond normally to whatever else she said. Keep the triage label short — one line is enough. Don't over-explain the tiers unless she asks.
+STILL ACTIVE:
+- Sync may lag on phone → open in Safari directly to bypass PWA cache
+- EU budget locked out at 0 → use "+ Log something" water layer button
 
 Current app version: v10.4`;
 }
@@ -5738,7 +5726,7 @@ function renderCompanionPanel(){
         ${S.ai_thinking?`<div style="align-self:flex-start;background:var(--bg3);padding:8px 12px;border-radius:10px;font-size:.8rem;color:var(--muted)">thinking…</div>`:""}
       </div>
       ${friction.length?`<div style="padding:8px 14px;border-top:1px solid var(--border);flex-shrink:0">
-        <div style="font-size:.65rem;color:var(--muted);margin-bottom:4px">Friction log (${friction.length})</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><div style="font-size:.65rem;color:var(--muted)">Friction log (${friction.length})</div><button id="clear-friction-log" style="background:none;border:none;color:var(--muted);font-size:.65rem;cursor:pointer;text-decoration:underline">clear</button></div>
         <div style="max-height:60px;overflow-y:auto">
           ${friction.slice(-3).map(f=>`<div style="font-size:.7rem;color:var(--subtle);border-left:2px solid var(--border);padding-left:6px;margin-bottom:3px">${f.text}</div>`).join("")}
         </div>
@@ -5759,6 +5747,7 @@ function renderCompanionPanel(){
 function bindCompanionPanel(){
   if(!S.ai_companion_open) return;
   document.getElementById("close-companion")?.addEventListener("click",()=>{S.ai_companion_open=false;render();});
+  document.getElementById("clear-friction-log")?.addEventListener("click",()=>{S.ai_friction_log=[];render();showToast("Friction log cleared");});
   document.getElementById("companion-overlay")?.addEventListener("click",e=>{if(e.target.id==="companion-overlay"){S.ai_companion_open=false;render();}});
 
   async function saveCompanionState(){
@@ -7887,7 +7876,7 @@ function bindMiddaySheet(){
 // PWA
 // ═══════════════════════════════════════════════════
 if("serviceWorker" in navigator){
-  const sw=`const C="pacing-arc-v9.0";self.addEventListener("install",e=>{self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))));self.clients.claim();});self.addEventListener("fetch",e=>{if(e.request.url.includes("supabase.co")||e.request.url.includes("fonts.")||e.request.url.includes("open-meteo"))return;e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cl=res.clone();caches.open(C).then(c=>c.put(e.request,cl));return res;})));});`;
+  const sw=`const C="pacing-arc-v10.4";self.addEventListener("install",e=>{self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))));self.clients.claim();});self.addEventListener("fetch",e=>{if(e.request.url.includes("supabase.co")||e.request.url.includes("fonts.")||e.request.url.includes("open-meteo"))return;e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cl=res.clone();caches.open(C).then(c=>c.put(e.request,cl));return res;})));});`;
   navigator.serviceWorker.register(URL.createObjectURL(new Blob([sw],{type:"application/javascript"}))).catch(()=>{});
 }
 const mf={name:"Pacing Arc",short_name:"Pacing Arc",start_url:"./",display:"standalone",background_color:"#060910",theme_color:"#060910",icons:[{src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%23060910'/%3E%3Ctext x='96' y='130' font-size='100' text-anchor='middle'%3E%F0%9F%8C%BF%3C/text%3E%3C/svg%3E",sizes:"192x192",type:"image/svg+xml"}]};
