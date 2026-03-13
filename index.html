@@ -3849,13 +3849,9 @@ function renderCanvasDayView(dateStr, today, viewToggle){
     }).join("")}
   </div>` : "";
 
-  // Fix 1 (v10.4): Unified list — sorted by start_time ascending (nulls last)
-  const unifiedBlocks = [...blocks].sort((a,b)=>{
-    if(a.start_time&&b.start_time)return a.start_time.localeCompare(b.start_time);
-    if(a.start_time)return -1;
-    if(b.start_time)return 1;
-    return 0;
-  });
+  // Render in S.canvas_blocks order (user drag order preserved).
+  // Do not re-sort here — sorting destroyed manual drag reorder on every render.
+  const unifiedBlocks = [...blocks];
   const timedSection = ""; // removed — unified list only
   const untimedSection = ""; // removed — unified list only
   const unifiedList = unifiedBlocks.length ? `<div class="in" style="margin-bottom:10px">
@@ -4040,7 +4036,7 @@ function renderEvents(){
             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
               <div>
                 <span style="font-size:.75rem;color:var(--muted)">${EVENT_TYPE_ICONS[e.type]||"📌"} ${dayOfWeekShort(e.date)}, ${dayOfMonthShort(e.date)}${e.start_time?` · <strong style="color:var(--subtle)">${e.start_time}</strong>`:""}</span>
-                <div style="font-size:.875rem;font-weight:500;margin-top:2px">${e.title}</div>
+                <div style="font-size:.875rem;font-weight:500;margin-top:2px;${e._done_today?'text-decoration:line-through;color:var(--muted)':''}">${e._done_today?'✓ ':''}${e.title}</div>
               </div>
               <div style="display:flex;gap:6px">
                 <button class="btn-edit-event" data-id="${e.id}" style="background:none;border:none;color:var(--muted);font-size:.8rem;cursor:pointer;padding:4px">✏️</button>
@@ -4362,6 +4358,11 @@ function renderMaintenance(){
           <div style="font-size:.65rem;color:var(--muted);margin-bottom:3px">Indoor line</div>
           <div style="font-size:.85rem;font-weight:500;color:var(--green)">✓ Always available</div>
           <div style="font-size:.65rem;color:var(--muted);margin-top:2px">No UV constraints</div>
+        </div>
+        <div style="background:var(--bg3);border-radius:8px;padding:8px 12px;flex:1;min-width:100px">
+          <div style="font-size:.65rem;color:var(--muted);margin-bottom:3px">Dryer</div>
+          <div style="font-size:.85rem;font-weight:500;color:var(--green)">✓ Always available</div>
+          <div style="font-size:.65rem;color:var(--muted);margin-top:2px">No UV or rain constraints</div>
         </div>
         ${laundry.rain!==null?`<div style="background:var(--bg3);border-radius:8px;padding:8px 12px;flex:1;min-width:100px">
           <div style="font-size:.65rem;color:var(--muted);margin-bottom:3px">Rain chance</div>
@@ -5530,7 +5531,7 @@ function renderVoluntarySheet(){
       <input type="range" id="vcl-sl" min="${s.min}" max="${s.max}" value="${val}" style="width:100%"/>
     </div>${s.optional?'<p style="color:var(--muted);font-size:.72rem;text-align:center;margin-top:4px">Optional — tap Next to skip</p>':""}`;
   }else if(s.type==="multi"){
-    inputH=`<div class="tags">${s.opts.map(o=>`<button class="vcl-tag${Array.isArray(val)&&val.includes(o)?" sel":""}" data-v="${o}">${o}</button>`).join("")}</div>`;
+    inputH=`<div class="tags">${s.opts.map(o=>`<button class="tag vcl-tag${Array.isArray(val)&&val.includes(o)?" sel":""}" data-v="${o}">${o}</button>`).join("")}</div>`;
   }
   const canGo=s.type==="text"||(s.type==="choice"&&val)||(s.type==="multi"&&Array.isArray(val)&&val.length)||(s.type==="slider");
   const isLast=step===steps.length-1;
@@ -6336,10 +6337,18 @@ function bindMain(){
           ts:Date.now()
         }];
         S.eu_used=Math.max(0,(S.eu_used||0)+(b.eu_cost||0));
+        // Issue 4: reflect done state in EVENTS so Events tab shows completion
+        if(b.event_id){
+          EVENTS=EVENTS.map(ev=>String(ev.id)===String(b.event_id)?{...ev,_done_today:true,_done_time:now.toISOString()}:ev);
+        }
       } else {
         // Untick: remove activity log entry and refund EU
         S.activity_log=S.activity_log.filter(a=>a.block_id!==id);
         S.eu_used=Math.max(0,(S.eu_used||0)-(b.eu_cost||0));
+        // Undo done state in EVENTS
+        if(b.event_id){
+          EVENTS=EVENTS.map(ev=>String(ev.id)===String(b.event_id)?{...ev,_done_today:false,_done_time:null}:ev);
+        }
       }
       return {...b,done:nowDone};
     });
@@ -7289,13 +7298,13 @@ Mood preference: ${S.meal_mood} food today.` : "");
   bindTemplateSheet();
 
   document.querySelectorAll(".btn-edit-template").forEach(b=>b.addEventListener("click",()=>{
-    const t=TEMPLATES.find(x=>x.id===b.dataset.id);
+    const t=TEMPLATES.find(x=>String(x.id)===String(b.dataset.id));
     if(t){S.template_edit={...t};S.show_template_sheet=true;render();}
   }));
   document.querySelectorAll(".btn-delete-template").forEach(b=>b.addEventListener("click",async()=>{
     if(confirm("Delete template?")){
       try{await sbDelete("pacing_arc_templates",b.dataset.id);}catch{}
-      TEMPLATES=TEMPLATES.filter(t=>t.id!==b.dataset.id);render();
+      TEMPLATES=TEMPLATES.filter(t=>String(t.id)!==String(b.dataset.id));render();
     }
   }));
 
@@ -7488,7 +7497,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
         S.supplement_log[today][key]={name,time:`${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`};
       }
       render();
-      saveToday({supplement_log:S.supplement_log});
+      syncToday(); // saves supplement_log via sbSaveToday
     });
   });
 
@@ -7607,21 +7616,14 @@ Return ONLY a JSON object with keys: eu_cost (number), buffer_eu (number, typica
       if(S.event_edit?.id){
         await sbUpdate("pacing_arc_events",S.event_edit.id,data);
         EVENTS=EVENTS.map(e=>String(e.id)===String(S.event_edit.id)?{...e,...localData}:e);
-        showToast("Event updated","green");
       }else{
         const saved=await sbInsert("pacing_arc_events",data);
-        if(saved&&saved.id){
-          EVENTS.push({...saved,...localData});
-          showToast("Event saved","green");
-        } else {
-          EVENTS.push({...localData,id:"tmp_"+Date.now()});
-          showToast("Event saved locally — check sync");
-        }
+        if(saved&&saved.id)EVENTS.push({...saved,...localData});
+        else EVENTS.push({...localData,id:"tmp_"+Date.now()});
       }
     }catch(err){
       EVENTS.push({...localData,id:"tmp_"+Date.now()});
-      showToast("Sync failed — event stored locally: "+err.message,"red");
-      console.error("[PacingArc] save-event error:",err);
+      showToast("Save failed — event stored locally only: "+err.message);
     }
     S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;render();
   });
