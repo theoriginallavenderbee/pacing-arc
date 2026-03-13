@@ -821,6 +821,7 @@ async function sbInsert(table,data){
     headers:{...SB_HDR,"Prefer":"return=representation"},
     body:JSON.stringify(data)
   });
+  if(!r.ok){const err=await r.text().catch(()=>"");throw new Error(`sbInsert ${table} HTTP ${r.status}: ${err}`);}
   const d=await r.json();
   return Array.isArray(d)?d[0]:d;
 }
@@ -6641,7 +6642,7 @@ function bindMain(){
       const toDate=col.dataset.date;
       if(!_weekDragId||!toDate||toDate===_weekFromDate)return;
       // Move event: update EVENTS array and save
-      const evIdx=EVENTS.findIndex(ev=>ev.id===_weekDragId);
+      const evIdx=EVENTS.findIndex(ev=>String(ev.id)===String(_weekDragId));
       if(evIdx===-1)return;
       const ev=EVENTS[evIdx];
       if(ev.type==="restorative"||RESTORATIVE_PRACTICES.some(p=>p.name===ev.title)){
@@ -6649,7 +6650,7 @@ function bindMain(){
       }
       EVENTS[evIdx]={...ev, date:toDate};
       try{
-        await sbQuery("pacing_arc_events","PATCH",{date:toDate},{id:`eq.${ev.id}`});
+        await sbUpdate("pacing_arc_events",ev.id,{date:toDate});
         showToast("Moved to "+new Date(toDate+"T12:00").toLocaleDateString("en-NZ",{weekday:"short",day:"numeric",month:"short"}),"green");
       }catch(err){
         showToast("Saved locally — sync to update","red");
@@ -7264,13 +7265,13 @@ Mood preference: ${S.meal_mood} food today.` : "");
 
   // Edit/delete events
   document.querySelectorAll(".btn-edit-event").forEach(b=>b.addEventListener("click",()=>{
-    const ev=EVENTS.find(e=>e.id===b.dataset.id);
+    const ev=EVENTS.find(e=>String(e.id)===String(b.dataset.id));
     if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();}
   }));
   document.querySelectorAll(".btn-delete-event").forEach(b=>b.addEventListener("click",async()=>{
     if(confirm("Delete this event?")){
       try{await sbDelete("pacing_arc_events",b.dataset.id);}catch{}
-      EVENTS=EVENTS.filter(e=>e.id!==b.dataset.id);render();
+      EVENTS=EVENTS.filter(e=>String(e.id)!==String(b.dataset.id));render();
     }
   }));
 
@@ -7376,7 +7377,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
     const id=b.dataset.id;
     const rating=b.dataset.rating;
     // Save feedback to the event record
-    const ev=EVENTS.find(e=>e.id===id);
+    const ev=EVENTS.find(e=>String(e.id)===String(id));
     if(ev){
       ev.recovery_feedback=rating;
       try{await sbUpdate("pacing_arc_events",id,{notes:(ev.notes?ev.notes+"\n":"")+"Recovery: "+rating});}catch{}
@@ -7605,15 +7606,22 @@ Return ONLY a JSON object with keys: eu_cost (number), buffer_eu (number, typica
     try{
       if(S.event_edit?.id){
         await sbUpdate("pacing_arc_events",S.event_edit.id,data);
-        EVENTS=EVENTS.map(e=>e.id===S.event_edit.id?{...e,...localData}:e);
+        EVENTS=EVENTS.map(e=>String(e.id)===String(S.event_edit.id)?{...e,...localData}:e);
+        showToast("Event updated","green");
       }else{
         const saved=await sbInsert("pacing_arc_events",data);
-        if(saved&&saved.id)EVENTS.push({...saved,...localData});
-        else EVENTS.push({...localData,id:"tmp_"+Date.now()});
+        if(saved&&saved.id){
+          EVENTS.push({...saved,...localData});
+          showToast("Event saved","green");
+        } else {
+          EVENTS.push({...localData,id:"tmp_"+Date.now()});
+          showToast("Event saved locally — check sync");
+        }
       }
     }catch(err){
       EVENTS.push({...localData,id:"tmp_"+Date.now()});
-      showToast("Save failed — event stored locally only: "+err.message);
+      showToast("Sync failed — event stored locally: "+err.message,"red");
+      console.error("[PacingArc] save-event error:",err);
     }
     S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;render();
   });
