@@ -3107,6 +3107,18 @@ function renderPlan(){
     ${renderTrendSummary()}
     ${renderActivityLog()}
     ${renderSupplementsToday()}
+    <div class="in" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+      <h3 style="margin-bottom:4px">Survival tier</h3>
+      <p style="font-size:.73rem;color:var(--muted);margin-bottom:10px;line-height:1.5">Always available — never triggers budget warning. You are always allowed to do these.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+        ${MICRO_ACTIONS.map(a=>`<button class="micro-action-btn" data-micro="${a.id}" data-cost="${a.eu}" style="display:flex;align-items:center;gap:5px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;font-size:.76rem;color:var(--subtle);cursor:pointer" title="${a.note||a.name}">
+          <span>${a.icon}</span><span>${a.name}</span>${a.eu===0?`<span style="font-size:.62rem;color:var(--green);background:rgba(52,211,153,.1);padding:1px 5px;border-radius:4px">free</span>`:`<span style="font-size:.62rem;color:var(--muted)">${a.eu} EU</span>`}
+        </button>`).join("")}
+      </div>
+      <button id="btn-log-rest" style="display:flex;align-items:center;gap:6px;background:rgba(56,189,248,.07);border:1px solid rgba(56,189,248,.2);border-radius:10px;padding:7px 12px;font-size:.76rem;color:var(--accent);cursor:pointer;width:100%">
+        🛋 Log a rest break
+      </button>
+    </div>
     <div style="margin-top:16px;margin-bottom:8px">
       <button class="btn in" id="btn-panic" style="width:100%;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3)!important;color:var(--red);font-weight:500">🛑 Stop — I need to rest</button>
     </div>
@@ -5657,7 +5669,7 @@ FIXED (do not re-raise these):
 - Dryer option missing from laundry window — added
 - Canvas done tick not reflecting in Events tab — fixed
 - Supplement tick not persisting — fixed
-- Week drag rescheduling not saving — fixed
+- Survival tier missing from dashboard — restored
 
 STILL ACTIVE:
 - Sync may lag on phone → open in Safari directly to bypass PWA cache
