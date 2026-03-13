@@ -3788,6 +3788,9 @@ function renderCanvasDayView(dateStr, today, viewToggle){
   };
 
   // Part 7a (v10.4): Collapsible pool sections
+  // Fix (v10.4 bug): pool was extracted to buildUnscheduledPool() but renderCanvasDayView
+  // was never updated to call it — pool was undefined, crashing the canvas tab on open.
+  const pool = buildUnscheduledPool(dateStr, gate, blocks);
   if(!S.pool_section_open) S.pool_section_open={};
   const POOL_SECTIONS = [
     {key:"hygiene", label:"Hygiene", filter:p=>["Shower","Hair care","Sponge wash","Brush teeth","Getting dressed"].some(n=>p.title.toLowerCase().includes(n.toLowerCase()))},
@@ -7492,7 +7495,6 @@ Mood preference: ${S.meal_mood} food today.` : "");
   document.getElementById("companion-fab")?.addEventListener("click",()=>{S.ai_companion_open=true;render();});
   bindPoolVariantSheet(); // v10.3
   bindBlockEditSheet(); // v10.4 Fix 2
-  bindBlockEditSheet();   // v10.4 Fix 2
   bindCompanionPanel();
 }
 
