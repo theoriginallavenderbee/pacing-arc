@@ -17,6 +17,7 @@ ALTER TABLE pacing_arc ADD COLUMN IF NOT EXISTS supplement_log jsonb;
 
 ===================================================
 -->
+<!-- v11 Session 1a: CSS variables updated to cool charcoal-slate palette. Lora font. Pohutukawa red accent. -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -26,11 +27,42 @@ ALTER TABLE pacing_arc ADD COLUMN IF NOT EXISTS supplement_log jsonb;
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="apple-mobile-web-app-title" content="Pacing Arc"/>
-<meta name="theme-color" content="#060910"/>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<meta name="theme-color" content="#161820"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#060910;--bg2:#0c1220;--bg3:#111d2e;--border:#1a2f4a;--accent:#38bdf8;--accent2:#818cf8;--green:#34d399;--yellow:#fbbf24;--red:#f87171;--orange:#fb923c;--text:#e2e8f0;--muted:#64748b;--subtle:#94a3b8;--serif:'DM Serif Display',Georgia,serif;--sans:'DM Sans',system-ui,sans-serif}
+:root{
+--bg:#161820;
+--bg2:#1e2028;
+--bg3:#262830;
+--bg4:#2e3038;
+--text:#e4e6ed;
+--muted:#8890a8;
+--subtle:#4e5468;
+--accent:#c4503a;
+--accent2:#8a3828;
+--accent-glow:rgba(196,80,58,0.15);
+--green:#3d7a58;
+--green-soft:rgba(61,122,88,0.15);
+--yellow:#9a7830;
+--yellow-soft:rgba(154,120,48,0.15);
+--red:#8a3828;
+--red-soft:rgba(138,56,40,0.15);
+--orange:#c4503a;
+--layer-regulatory:#2e5878;
+--layer-regulatory-soft:rgba(46,88,120,0.2);
+--layer-operational:#6a5a2a;
+--layer-operational-soft:rgba(106,90,42,0.2);
+--layer-generative:#3a6848;
+--layer-generative-soft:rgba(58,104,72,0.2);
+--border:rgba(228,230,237,0.08);
+--border-soft:rgba(228,230,237,0.04);
+--serif:'Lora',Georgia,serif;
+--sans:'DM Sans',system-ui,sans-serif;
+--shadow-sm:0 1px 3px rgba(0,0,0,0.5);
+--shadow-md:0 4px 12px rgba(0,0,0,0.6);
+}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;min-height:-webkit-fill-available;font-weight:300;line-height:1.6}
 #app{min-height:100vh;min-height:-webkit-fill-available;display:flex;flex-direction:column}
