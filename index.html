@@ -3684,7 +3684,12 @@ function buildCanvasBlocksForDate(dateStr){
       start_time: ev.start_time||null,
       end_time: ev.end_time||null,
       location: ev.location||null,
-      duration_mins: Math.round((perDayEu||2)*25),
+      duration_mins: (ev.start_time && ev.end_time) ? (() => {
+        const [sh,sm]=(ev.start_time||"0:0").split(":").map(Number);
+        const [eh,em]=(ev.end_time||"0:0").split(":").map(Number);
+        const diff = (eh*60+em)-(sh*60+sm);
+        return diff > 0 ? diff : Math.round((perDayEu||2)*25);
+      })() : Math.round((perDayEu||2)*25),
       tethered: false,
       done: false,
     });
@@ -6607,6 +6612,37 @@ function bindMain(){
     }
   });
 
+  // v11: Tap time-block → open event edit sheet (dedicated handler for positioned blocks)
+  document.querySelectorAll(".time-block[data-block-id]").forEach(el=>{
+    let _tx=0,_ty=0,_tmoved=false;
+    el.addEventListener("touchstart",e=>{_tx=e.touches[0].clientX;_ty=e.touches[0].clientY;_tmoved=false;},{passive:true});
+    el.addEventListener("touchmove",e=>{if(Math.abs(e.touches[0].clientX-_tx)>8||Math.abs(e.touches[0].clientY-_ty)>8)_tmoved=true;},{passive:true});
+    el.addEventListener("touchend",e=>{
+      if(e.target.closest("button"))return;
+      if(_tmoved)return;
+      e.preventDefault(); e.stopPropagation();
+      const id=el.dataset.blockId;
+      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
+      if(!block)return;
+      if(block.event_id){
+        const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
+        if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+      }
+      S.block_edit={...block};S.show_block_edit=true;render();
+    });
+    el.addEventListener("click",e=>{
+      if(e.target.closest("button"))return;
+      const id=el.dataset.blockId;
+      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
+      if(!block)return;
+      if(block.event_id){
+        const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
+        if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+      }
+      S.block_edit={...block};S.show_block_edit=true;render();
+    });
+  });
+
   // Colour setup — save
   document.getElementById("btn-canvas-colours-save")?.addEventListener("click",()=>{
     ["rock","pebble","sand","gap","water"].forEach(k=>{
@@ -7927,7 +7963,10 @@ Return ONLY a JSON object with keys: eu_cost (number), buffer_eu (number, typica
       EVENTS.push({...localData,id:"tmp_"+Date.now()});
       showToast("Save failed — event stored locally only: "+err.message);
     }
-    S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;render();
+    S.show_event_sheet=false;S.event_edit=null;S.event_sheet_draft=null;
+    // v11: force canvas blocks refresh so time/duration edits show immediately
+    S.canvas_blocks=[];
+    render();
   });
 }
 
