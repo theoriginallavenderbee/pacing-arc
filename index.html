@@ -1075,6 +1075,8 @@ let S={
   },
   // v10.3 — pool variant picker and AI companion
   show_block_edit:false,       // inline block edit sheet open
+  show_quick_add:false,        // v11: quick-add to canvas sheet
+  quick_add_search:"",         // v11: search filter for quick-add
   block_edit:null,             // block being edited
   event_sheet_draft:null,      // v10.4 Fix 4: persists event form fields across re-renders
   supplement_log:{},           // v10.4 Part 4e: {date: {key: {name,dose,time}}}
@@ -3134,6 +3136,7 @@ function renderMain(){
   if(S.show_retroactive_sheet)sheets.push(renderRetroactiveSheet()); // v9.0
   if(S.show_log_past_sheet)sheets.push(renderLogPastSheet()); // v9.0
   if(S.show_block_edit)sheets.push(renderBlockEditSheet()); // v10.4 Fix 2
+  if(S.show_quick_add)sheets.push(renderQuickAddSheet());
   if(S.pool_variant_pick)sheets.push(renderPoolVariantSheet()); // v10.3
   if(S.ai_companion_open)sheets.push(renderCompanionPanel()); // v10.3
 
@@ -4144,6 +4147,7 @@ function renderCanvasDayView(dateStr, today, viewToggle){
 
   // ── Add buttons ──
   const addBtns = `<div class="in" style="margin-bottom:12px;display:flex;flex-direction:column;gap:6px">
+    <button id="canvas-quick-add" style="background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;border-radius:10px;width:100%;padding:10px;font-size:.78rem;color:#fff;cursor:pointer;font-weight:500">＋ Add to day</button>
     <button id="canvas-add-rest-gap" style="background:${layerColV11("regulatory",0.07)};border:1px dashed ${layerColV11("regulatory",0.3)}!important;border-radius:10px;width:100%;padding:8px;font-size:.74rem;color:${layerColV11("regulatory")};cursor:pointer">🛋 + Add rest gap</button>
     <button id="canvas-add-water" style="background:none;border:1px dashed var(--border)!important;border-radius:10px;width:100%;padding:8px;font-size:.74rem;color:var(--muted);cursor:pointer">+ Log something that happened</button>
   </div>`;
@@ -5555,6 +5559,179 @@ function bindBlockEditSheet(){
     S.canvas_blocks=(S.canvas_blocks||[]).filter(bl=>bl.id!==b.id);
     S.show_block_edit=false;S.block_edit=null;
     render();saveCanvasBlocks();
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// v11: QUICK-ADD TO CANVAS SHEET
+// ═══════════════════════════════════════════════════
+function renderQuickAddSheet(){
+  const search = (S.quick_add_search||"").toLowerCase();
+  const gate = S.gate||"green";
+  const now = new Date();
+  const nextHour = Math.min(23, now.getHours()+1);
+  const defaultTime = String(nextHour).padStart(2,"0")+":00";
+
+  // Build activity list from all sources
+  const activities = [];
+  // Tasks from TASK_COSTS_BASE
+  Object.keys(TASK_COSTS_BASE).forEach(name=>{
+    const tier = getDefaultTier(name, gate);
+    activities.push({
+      name, eu: tier?.eu ?? TASK_COSTS_BASE[name],
+      tier_label: tier?.label||"",
+      layer: SAND_TASK_NAMES.has(name) ? "sand" : "pebble",
+      restorative: false
+    });
+  });
+  // Add brush teeth + floss if not already there
+  if(!activities.find(a=>a.name==="Brush teeth")){
+    activities.push({name:"Brush teeth",eu:0.5,tier_label:"Vagus activation",layer:"pebble",restorative:true});
+  }
+  if(!activities.find(a=>a.name==="Floss")){
+    activities.push({name:"Floss",eu:0.5,tier_label:"",layer:"pebble",restorative:false});
+  }
+  // Restorative practices
+  RESTORATIVE_PRACTICES.forEach(rp=>{
+    if(activities.find(a=>a.name===rp.name)) return;
+    const tier = getDefaultTier(rp.name, gate);
+    activities.push({
+      name: rp.name, eu: tier?.eu ?? rp.eu_cost,
+      tier_label: tier?.label||"",
+      layer: "rock", restorative: true,
+      return_eu: rp.return_eu, return_note: rp.return_note
+    });
+  });
+
+  // Filter by search
+  const filtered = search
+    ? activities.filter(a=>a.name.toLowerCase().includes(search))
+    : activities;
+
+  // Sort: restorative first, then operational
+  filtered.sort((a,b)=>{
+    if(a.restorative && !b.restorative) return -1;
+    if(!a.restorative && b.restorative) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return `<div class="sheet-overlay" id="quick-add-overlay">
+    <div class="sheet" style="max-height:85vh">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h2 style="font-size:1rem">Add to day</h2>
+        <button id="close-quick-add" style="background:none;border:none;color:var(--muted);font-size:1.4rem;cursor:pointer">×</button>
+      </div>
+
+      <div style="margin-bottom:10px">
+        <input type="text" id="qa-search" class="text-in" style="width:100%;font-size:.82rem" placeholder="Search or type new activity..." value="${escH(S.quick_add_search||"")}"/>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <div style="flex:1">
+          <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:3px">Start time</label>
+          <input type="time" id="qa-time" class="text-in" style="width:100%;font-size:.82rem" value="${defaultTime}"/>
+        </div>
+        <div style="flex:1">
+          <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:3px">Duration (mins)</label>
+          <input type="number" id="qa-duration" class="text-in" style="width:100%;font-size:.82rem" value="30" min="5" max="480" step="5"/>
+        </div>
+      </div>
+
+      ${filtered.length ? `<div style="max-height:40vh;overflow-y:auto;margin-bottom:10px">
+        ${filtered.map(a=>`<button class="qa-pick" data-name="${escH(a.name)}" data-eu="${a.eu}" data-layer="${a.layer}" data-restorative="${a.restorative}" data-return-eu="${a.return_eu||0}" data-return-note="${escH(a.return_note||"")}"
+          style="display:flex;align-items:center;justify-content:space-between;width:100%;background:${layerColV11(a.layer,0.06)};border:1px solid ${layerColV11(a.layer,0.2)}!important;border-radius:8px;padding:9px 12px;margin-bottom:4px;cursor:pointer;text-align:left">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:.8rem;color:var(--text)">${a.restorative?"🌿 ":""}${escH(a.name)}</div>
+            ${a.tier_label?`<div style="font-size:.62rem;color:var(--muted)">${escH(a.tier_label)}</div>`:""}
+          </div>
+          <div style="flex-shrink:0;text-align:right">
+            <div style="font-size:.78rem;font-weight:500;color:${layerColV11(a.layer)}">${a.eu} EU</div>
+            ${a.return_eu?`<div style="font-size:.6rem;color:${layerColV11("regulatory")}">↩${a.return_eu}</div>`:""}
+          </div>
+        </button>`).join("")}
+      </div>` : `<div style="padding:16px;text-align:center;color:var(--muted);font-size:.8rem">No matching activities</div>`}
+
+      ${search ? `<button id="qa-custom" class="btn btn-secondary" style="width:100%;margin-bottom:8px;font-size:.78rem">+ Add "${escH(S.quick_add_search)}" as custom activity</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function bindQuickAddSheet(){
+  if(!S.show_quick_add) return;
+  document.getElementById("close-quick-add")?.addEventListener("click",()=>{S.show_quick_add=false;S.quick_add_search="";render();});
+  document.getElementById("quick-add-overlay")?.addEventListener("click",e=>{if(e.target.id==="quick-add-overlay"){S.show_quick_add=false;S.quick_add_search="";render();}});
+  document.getElementById("qa-search")?.addEventListener("input",e=>{
+    S.quick_add_search=e.target.value;render();
+    // Re-focus after render
+    requestAnimationFrame(()=>{
+      const el=document.getElementById("qa-search");
+      if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}
+    });
+  });
+
+  // Pick an existing activity
+  document.querySelectorAll(".qa-pick").forEach(btn=>btn.addEventListener("click",()=>{
+    const name = btn.dataset.name;
+    const eu = parseFloat(btn.dataset.eu)||0;
+    const layer = btn.dataset.layer||"pebble";
+    const restorative = btn.dataset.restorative==="true";
+    const return_eu = parseFloat(btn.dataset.returnEu)||0;
+    const return_note = btn.dataset.returnNote||"";
+    const startTime = document.getElementById("qa-time")?.value||null;
+    const durMins = parseInt(document.getElementById("qa-duration")?.value)||30;
+
+    let endTime = null;
+    if(startTime){
+      const [sh,sm] = startTime.split(":").map(Number);
+      const endTotal = sh*60+sm+durMins;
+      endTime = String(Math.min(23,Math.floor(endTotal/60))).padStart(2,"0")+":"+String(endTotal%60).padStart(2,"0");
+    }
+
+    const newBlock = {
+      id:"qa_"+Date.now(),
+      title:name, layer:layer, eu_cost:eu,
+      return_eu, return_note,
+      restorative,
+      start_time:startTime, end_time:endTime,
+      duration_mins:durMins,
+      tethered:false, done:false,
+    };
+    S.canvas_blocks = [...(S.canvas_blocks||[]), newBlock];
+    S.show_quick_add=false; S.quick_add_search="";
+    render(); saveCanvasBlocks();
+    showToast(name + (startTime?" at "+startTime:""),"green");
+  }));
+
+  // Custom activity (from search text)
+  document.getElementById("qa-custom")?.addEventListener("click",()=>{
+    const name = S.quick_add_search||"";
+    if(!name.trim()) return;
+    const startTime = document.getElementById("qa-time")?.value||null;
+    const durMins = parseInt(document.getElementById("qa-duration")?.value)||30;
+    const euStr = prompt("EU cost for '"+name+"':", "1");
+    const eu = parseFloat(euStr)||1;
+
+    let endTime = null;
+    if(startTime){
+      const [sh,sm] = startTime.split(":").map(Number);
+      const endTotal = sh*60+sm+durMins;
+      endTime = String(Math.min(23,Math.floor(endTotal/60))).padStart(2,"0")+":"+String(endTotal%60).padStart(2,"0");
+    }
+
+    const newBlock = {
+      id:"qa_"+Date.now(),
+      title:name.trim(), layer:"pebble", eu_cost:eu,
+      return_eu:0, return_note:"",
+      restorative:false,
+      start_time:startTime, end_time:endTime,
+      duration_mins:durMins,
+      tethered:false, done:false,
+    };
+    S.canvas_blocks = [...(S.canvas_blocks||[]), newBlock];
+    S.show_quick_add=false; S.quick_add_search="";
+    render(); saveCanvasBlocks();
+    showToast(name.trim() + (startTime?" at "+startTime:""),"green");
   });
 }
 
@@ -7053,6 +7230,11 @@ function bindMain(){
     render(); saveCanvasBlocks();
   }));
 
+  // v11: Quick-add to canvas
+  document.getElementById("canvas-quick-add")?.addEventListener("click",()=>{
+    S.show_quick_add=true;S.quick_add_search="";render();
+  });
+
   // Add water annotation
   document.getElementById("canvas-add-rest-gap")?.addEventListener("click",()=>{
     S.canvas_blocks=[...(S.canvas_blocks||[]),{
@@ -8134,6 +8316,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
   document.getElementById("companion-fab")?.addEventListener("click",()=>{S.ai_companion_open=true;render();});
   bindPoolVariantSheet(); // v10.3
   bindBlockEditSheet(); // v10.4 Fix 2
+  bindQuickAddSheet(); // v11
   bindCompanionPanel();
 }
 
