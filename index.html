@@ -18,6 +18,7 @@ ALTER TABLE pacing_arc ADD COLUMN IF NOT EXISTS supplement_log jsonb;
 ===================================================
 -->
 <!-- v11 Session 1a: CSS variables updated to cool charcoal-slate palette. Lora font. Pohutukawa red accent. -->
+<!-- v11 Session 1b: syncToday() rewritten to field-level merge. supplement_log in sync payload. saveCompanionState() top-level. visibilitychange updated. 15 event handler calls use queuedSyncToday(). -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1201,21 +1202,15 @@ async function init(){
   document.addEventListener("visibilitychange",async()=>{
     if(document.visibilityState==="visible"&&(S.screen==="main"||S.screen==="home")&&PROFILE){
       try{
-        const today=await sbGetToday();
-        if(today){
-          // Only update EU if more has been used elsewhere (don't rewind)
-          if(today.eu_used>S.eu_used)S.eu_used=today.eu_used;
-          if(today.checkin&&Object.keys(today.checkin).length>Object.keys(S.ci||{}).length)S.ci=today.checkin;
-          if(today.evening_done)S.evening_done=true;
-          if(today.midday_done)S.midday_done=true;
-          // v10.1: sync canvas blocks across devices
-          if(today.canvas_blocks&&Array.isArray(today.canvas_blocks)&&today.canvas_blocks.length){
-            S.canvas_blocks=today.canvas_blocks;
-          }
-          if(today.canvas_date)S.canvas_date=today.canvas_date;
-          render();
+        await syncToday();
+        const companionRow=await sbGet("pacing_arc",{device_id:DEVICE_ID(),date:"companion"});
+        if(companionRow&&companionRow.checkin){
+          const cs=companionRow.checkin;
+          if(cs.messages)S.companion_messages=cs.messages;
+          if(cs.context)S.companion_context=cs.context;
         }
-      }catch{}
+        render();
+      }catch(e){console.warn("[PacingArc] visibilitychange sync failed:",e.message);}
     }
   });
 }
@@ -1242,9 +1237,46 @@ async function saveCanvasBlocks(){
 
 async function syncToday(){
   try{
-    await sbSaveToday({gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,plan:S.plan||null,checkin:S.ci||null,midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done,canvas_blocks:(S.canvas_blocks&&S.canvas_blocks.length?S.canvas_blocks:null)||null,canvas_date:S.canvas_date||null});
+    SYNC_STATUS="loading";
+    updateSyncDot();
+    const remote=await sbGetToday();
+    if(!remote){
+      await sbSaveToday(localTodayPayload());
+      SYNC_STATUS="ok";
+      updateSyncDot();
+      return;
+    }
+    const merged={
+      gate:mergeGate(S.gate,remote.gate),
+      eu_budget:S.eu_budget||remote.eu_budget||0,
+      eu_used:Math.max(S.eu_used||0,remote.eu_used||0),
+      plan:mergePlan(S.plan,remote.plan),
+      checkin:mergeCheckin(S.ci,remote.checkin),
+      midday_done:S.midday_done||remote.midday_done||false,
+      in_crash:S.in_crash||remote.in_crash||false,
+      evening_done:S.evening_done||remote.evening_done||false,
+      canvas_blocks:mergeCanvasBlocks(S.canvas_blocks,remote.canvas_blocks),
+      canvas_date:S.canvas_date||remote.canvas_date||null,
+      supplement_log:mergeSupplementLog(S.supplement_log,remote.supplement_log),
+    };
+    S.eu_used=merged.eu_used;
+    S.gate=merged.gate;
+    S.eu_budget=merged.eu_budget;
+    S.plan=merged.plan;
+    S.ci=merged.checkin;
+    S.midday_done=merged.midday_done;
+    S.in_crash=merged.in_crash;
+    S.evening_done=merged.evening_done;
+    S.canvas_blocks=merged.canvas_blocks;
+    S.canvas_date=merged.canvas_date;
+    S.supplement_log=merged.supplement_log;
+    await sbSaveToday({...merged,updated_at:new Date().toISOString()});
     SYNC_STATUS="ok";
-  }catch(e){SYNC_STATUS="off";console.warn("[PacingArc] syncToday failed:",e.message);}
+    render();
+  }catch(e){
+    SYNC_STATUS="off";
+    console.warn("[PacingArc] syncToday failed:",e.message);
+  }
   updateSyncDot();
 }
 function updateSyncDot(){
@@ -1253,6 +1285,99 @@ function updateSyncDot(){
   });
 }
 function syncDotHtml(){return `<span class="sync-dot ${SYNC_STATUS==="ok"?"sync-ok":SYNC_STATUS==="loading"?"sync-busy":"sync-off"}"></span>`;}
+
+// ── saveCompanionState (top-level) ───────────────────
+async function saveCompanionState(){
+  try{
+    await sbUpsert("pacing_arc",{
+      device_id:DEVICE_ID(), date:"companion",
+      companion_state:{friction_log:S.ai_friction_log||[],messages:(S.ai_messages||[]).slice(-20)},
+      updated_at:new Date().toISOString()
+    });
+  }catch{}
+}
+
+// ── v11 SYNC HELPERS ─────────────────────────────────
+
+function localTodayPayload(){
+  return {
+    gate:S.gate,eu_budget:S.eu_budget,eu_used:S.eu_used,
+    plan:S.plan||null,checkin:S.ci||null,
+    midday_done:S.midday_done,in_crash:S.in_crash,evening_done:S.evening_done,
+    canvas_blocks:(S.canvas_blocks&&S.canvas_blocks.length?S.canvas_blocks:null)||null,
+    canvas_date:S.canvas_date||null,
+    supplement_log:S.supplement_log||null,
+    updated_at:new Date().toISOString()
+  };
+}
+
+function mergeGate(local,remote){
+  const rank={red:3,amber:2,yellow:2,green:1,null:0,undefined:0};
+  return (rank[local]||0)>=(rank[remote]||0)?local:remote;
+}
+
+function mergePlan(local,remote){
+  if(!local&&!remote)return null;
+  if(!local)return remote;
+  if(!remote)return local;
+  const ll=Array.isArray(local)?local.length:Object.keys(local).length;
+  const rl=Array.isArray(remote)?remote.length:Object.keys(remote).length;
+  return ll>=rl?local:remote;
+}
+
+function mergeCheckin(local,remote){
+  if(!local&&!remote)return null;
+  if(!local)return remote;
+  if(!remote)return local;
+  const merged={...remote,...local};
+  Object.keys(merged).forEach(k=>{
+    if((local[k]==null||local[k]===undefined)&&remote[k]!=null)merged[k]=remote[k];
+  });
+  return merged;
+}
+
+function mergeCanvasBlocks(local,remote){
+  if(!local||!local.length)return remote||[];
+  if(!remote||!remote.length)return local||[];
+  return local.length>=remote.length?local:remote;
+}
+
+function mergeSupplementLog(local,remote){
+  if(!local&&!remote)return {};
+  if(!local)return remote||{};
+  if(!remote)return local||{};
+  const merged={...remote};
+  Object.keys(local).forEach(date=>{
+    if(!merged[date]){merged[date]=local[date];}
+    else{merged[date]={...merged[date],...local[date]};}
+  });
+  return merged;
+}
+
+const SYNC_QUEUE=[];
+
+async function queuedSyncToday(){
+  if(!navigator.onLine){
+    SYNC_QUEUE.push({type:'today',payload:localTodayPayload(),timestamp:Date.now()});
+    SYNC_STATUS="off";
+    updateSyncDot();
+    return;
+  }
+  await syncToday();
+}
+
+window.addEventListener("online",async()=>{
+  while(SYNC_QUEUE.length>0){
+    const item=SYNC_QUEUE.shift();
+    if(item.type==='today'){
+      try{await syncToday();}
+      catch(e){SYNC_QUEUE.unshift(item);break;}
+    }
+  }
+  updateSyncDot();
+});
+
+// ── END v11 SYNC HELPERS ──────────────────────────────
 
 // ═══════════════════════════════════════════════════
 // WEATHER (v4.2)
@@ -2528,7 +2653,7 @@ function applyWakeupRefresh(newBb, newEnergy, newSymptoms){
   S.project_readiness = calcProjectReadiness();
   S.dissociation_risk = checkDissociationRisk();
   S.wakeup_check_done = true;
-  syncToday();
+  queuedSyncToday();
 }
 
 function generateMealPrompt(){
@@ -2652,7 +2777,7 @@ function commitRetroactiveLog(timeStr){
   S.show_retroactive_sheet=false;
   S.retroactive_task=null;
   startRestTimer();
-  render();syncToday();
+  render();queuedSyncToday();
   showToast(`Logged: ${task} (${timeStr})`);
 }
 
@@ -2940,7 +3065,7 @@ function bindCheckin(){
     S.wakeup_check_dismissed=false;
     S.wakeup_check_done=false;
     render();
-    syncToday();
+    queuedSyncToday();
     // v10.3: auto morning briefing if AI companion enabled
     if(aiEnabled()){
       setTimeout(async()=>{
@@ -5794,16 +5919,6 @@ function bindCompanionPanel(){
   document.getElementById("clear-friction-log")?.addEventListener("click",()=>{S.ai_friction_log=[];render();showToast("Friction log cleared");});
   document.getElementById("companion-overlay")?.addEventListener("click",e=>{if(e.target.id==="companion-overlay"){S.ai_companion_open=false;render();}});
 
-  async function saveCompanionState(){
-    try{
-      await sbUpsert("pacing_arc",{
-        device_id:DEVICE_ID(), date:"companion",
-        companion_state:{friction_log:S.ai_friction_log||[],messages:(S.ai_messages||[]).slice(-20)},
-        updated_at:new Date().toISOString()
-      });
-    }catch{}
-  }
-
   async function sendMsg(text){
     if(!text?.trim())return;
     if(!aiEnabled()){showToast("Add API key in Settings → AI companion","red");return;}
@@ -7194,7 +7309,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
     S.dissociation_risk = checkDissociationRisk();
     S.project_readiness = calcProjectReadiness();
     startRestTimer();
-    render();syncToday();
+    render();queuedSyncToday();
   }));
   document.getElementById("btn-skip-rest")?.addEventListener("click",()=>{
     if(restTimerInterval)clearInterval(restTimerInterval);
@@ -7213,7 +7328,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
     if(!S.activity_log)S.activity_log=[];
     S.activity_log.push({task:`Rest break (${mins} min)`,cost:-maxReturn,time:t,retroactive:false});
     S.pending_rest_return=null;
-    render();syncToday();
+    render();queuedSyncToday();
     showToast(`Rest logged · +${maxReturn} EU returned`,"green");
   });
   document.getElementById("btn-skip-rest-return")?.addEventListener("click",()=>{
@@ -7249,7 +7364,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
     const t=now.getHours().toString().padStart(2,"0")+":"+now.getMinutes().toString().padStart(2,"0");
     if(!S.activity_log)S.activity_log=[];
     S.activity_log.push({task:name,cost,time:t,retroactive:false});
-    render();syncToday();
+    render();queuedSyncToday();
     if(cost===0)showToast(`✓ ${name}`,"green");
   }));
 
@@ -7280,13 +7395,13 @@ Mood preference: ${S.meal_mood} food today.` : "");
     if(!S.activity_log)S.activity_log=[];
     S.activity_log.push({task:`Rest break (${mins} min)`,cost:-maxReturn,time:t,retroactive:false});
     S.show_log_rest=false;
-    render();syncToday();
+    render();queuedSyncToday();
     showToast(`Rest logged · +${maxReturn} EU returned`,"green");
   });
 
   // Crash tab
   document.querySelectorAll(".crash-day").forEach(b=>b.addEventListener("click",()=>{S.crash_day=Number(b.dataset.day);render();}));
-  document.getElementById("btn-exit-crash")?.addEventListener("click",()=>{S.in_crash=false;S.tab="plan";render();syncToday();});
+  document.getElementById("btn-exit-crash")?.addEventListener("click",()=>{S.in_crash=false;S.tab="plan";render();queuedSyncToday();});
 
   // Forecast strip
   document.getElementById("toggle-forecast")?.addEventListener("click",()=>{S.forecast_days=S.forecast_days===7?14:7;render();});
@@ -7389,7 +7504,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
       const task=DEFAULT_MAINTENANCE.find(t=>t.id===b.dataset.id);
       if(task&&S.eu_used+task.eu_cost<=S.eu_budget){
         S.eu_used+=task.eu_cost;
-        syncToday();
+        queuedSyncToday();
       }
     }
     render();
@@ -7490,7 +7605,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
     const bm=getBankingModForDate(todayStr());
     const newBudget=euBudget(S.ci,bm);
     if(newBudget>S.eu_budget){S.eu_budget=newBudget;}
-    render();syncToday();
+    render();queuedSyncToday();
     showToast("First meal logged — EU updated");
   });
   document.getElementById("close-evening-sheet")?.addEventListener("click",()=>{S.show_evening=false;render();});
@@ -7543,7 +7658,7 @@ Mood preference: ${S.meal_mood} food today.` : "");
         S.supplement_log[today][key]={name,time:`${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`};
       }
       render();
-      syncToday();
+      queuedSyncToday();
     });
   });
 
@@ -7767,7 +7882,7 @@ function bindEveningSheet(){
     // v9.0 — show evening close-out loop
     S.closeout_data=generateCloseout();
     S.screen="closeout";
-    render();syncToday();
+    render();queuedSyncToday();
   });
 }
 
@@ -7825,7 +7940,7 @@ function bindVoluntarySheet(){
     if(newBudget>prevBudget){const diff=newBudget-prevBudget;S.eu_budget=prevBudget+diff;}
     else{S.eu_budget=Math.max(prevUsed,newBudget);}
     S.show_voluntary=false;
-    render();syncToday();
+    render();queuedSyncToday();
     showToast(`Gate updated: ${newGate} · ${S.eu_budget-S.eu_used} EU remaining`);
   });
 }
@@ -7864,7 +7979,7 @@ function bindPanicSheet(){
       S.in_crash=true;S.crash_day=1;
       S.tab="crash";
     }
-    render();syncToday();
+    render();queuedSyncToday();
   });
 }
 
@@ -7912,7 +8027,7 @@ function bindMiddaySheet(){
       if(S.plan)S.plan.midday_updated=true;
     }
     S.midday_done=true;S.show_midday=false;S.ci.midday=S.midday_data;
-    render();syncToday();
+    render();queuedSyncToday();
   });
 }
 
