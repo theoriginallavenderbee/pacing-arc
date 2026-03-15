@@ -4049,8 +4049,8 @@ function renderCanvasDayView(dateStr, today, viewToggle){
 
   const timeGrid = `<div class="time-grid in" style="position:relative;margin-bottom:12px;height:${TOTAL_HOURS*HOUR_H}px">
     ${hourLines}
-    <div style="position:absolute;top:0;left:48px;right:0;bottom:0;pointer-events:none">
-      <div style="position:relative;width:100%;height:100%;pointer-events:auto">
+    <div style="position:absolute;top:0;left:48px;right:0;bottom:0">
+      <div style="position:relative;width:100%;height:100%">
         ${timedBlocksHtml}
       </div>
     </div>
@@ -6579,12 +6579,19 @@ function bindMain(){
     S.show_voluntary=true;S.voluntary_step=0;S.voluntary_data={};render();
   });
 
-  // v11: Tap empty time slot → create new event at that hour
-  document.querySelectorAll(".time-grid-slot").forEach(slot=>{
-    slot.addEventListener("click",(e)=>{
-      // Don't fire if a block was clicked
+  // v11: Tap empty area in time grid → create new event at that hour
+  const timeGridOverlay = document.querySelector(".time-grid > div[style*='position:absolute']");
+  if(timeGridOverlay){
+    timeGridOverlay.addEventListener("click",(e)=>{
+      // Don't fire if a time-block or button was clicked
       if(e.target.closest(".time-block")) return;
-      const hr = parseInt(slot.dataset.hour);
+      if(e.target.closest("button")) return;
+      const rect = timeGridOverlay.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const HOUR_H = 60;
+      const START_HOUR = 6;
+      const hr = Math.floor(y / HOUR_H) + START_HOUR;
+      if(hr < 6 || hr > 22) return;
       const timeStr = String(hr).padStart(2,"0")+":00";
       const endHr = Math.min(23, hr+1);
       const endStr = String(endHr).padStart(2,"0")+":00";
@@ -6602,7 +6609,38 @@ function bindMain(){
       S.show_event_sheet=true;
       render();
     });
-  });
+    // Touch version for iOS
+    let _slotTx=0,_slotTy=0,_slotMoved=false;
+    timeGridOverlay.addEventListener("touchstart",e=>{_slotTx=e.touches[0].clientX;_slotTy=e.touches[0].clientY;_slotMoved=false;},{passive:true});
+    timeGridOverlay.addEventListener("touchmove",e=>{if(Math.abs(e.touches[0].clientX-_slotTx)>8||Math.abs(e.touches[0].clientY-_slotTy)>8)_slotMoved=true;},{passive:true});
+    timeGridOverlay.addEventListener("touchend",(e)=>{
+      if(_slotMoved) return;
+      if(e.target.closest(".time-block")) return;
+      if(e.target.closest("button")) return;
+      const rect = timeGridOverlay.getBoundingClientRect();
+      const y = _slotTy - rect.top;
+      const HOUR_H = 60;
+      const START_HOUR = 6;
+      const hr = Math.floor(y / HOUR_H) + START_HOUR;
+      if(hr < 6 || hr > 22) return;
+      const timeStr = String(hr).padStart(2,"0")+":00";
+      const endHr = Math.min(23, hr+1);
+      const endStr = String(endHr).padStart(2,"0")+":00";
+      S.event_edit={
+        date:S.canvas_date||todayStr(),
+        title:"",
+        type:"general",
+        eu_cost:2,
+        start_time:timeStr,
+        end_time:endStr,
+        notes:"",
+        location:"",
+        _new:true
+      };
+      S.show_event_sheet=true;
+      render();
+    });
+  }
 
   // v11: Auto-scroll time grid to current time
   requestAnimationFrame(()=>{
