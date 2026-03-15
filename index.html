@@ -2826,7 +2826,7 @@ function renderLoading(){
 function renderHome(){
   const name=PROFILE&&PROFILE.name?`, ${PROFILE.name}`:"";
   const todayLoaded=S.plan!==null;
-  const checkinDone=S.ci&&S.ci.energy!==undefined;
+  const checkinDone=(S.ci&&S.ci.energy!==undefined)||(()=>{try{return localStorage.getItem("pac_checkin_done_"+todayStr())==="1";}catch(_){return false;}})();
   const gateStatus=checkinDone?`<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:16px;padding:10px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;font-size:.82rem" class="in">
     <span>${gateEmoji(S.gate)} <span style="color:var(--subtle)">${S.gate} gate</span></span>
     <span style="color:var(--border)">·</span>
@@ -3083,6 +3083,8 @@ function bindCheckin(){
     S.anchor_soft_lock=false;
     S.screen="main";S.tab="plan";
     S.checkin_submitted_at=Date.now();
+    // v11: persist checkin done flag so home screen stays correct across sync
+    try{localStorage.setItem("pac_checkin_done_"+todayStr(),"1");}catch(_){}
     S.wakeup_check_dismissed=false;
     S.wakeup_check_done=false;
     render();
@@ -5662,12 +5664,19 @@ function bindQuickAddSheet(){
   document.getElementById("close-quick-add")?.addEventListener("click",()=>{S.show_quick_add=false;S.quick_add_search="";render();});
   document.getElementById("quick-add-overlay")?.addEventListener("click",e=>{if(e.target.id==="quick-add-overlay"){S.show_quick_add=false;S.quick_add_search="";render();}});
   document.getElementById("qa-search")?.addEventListener("input",e=>{
-    S.quick_add_search=e.target.value;render();
-    // Re-focus after render
-    requestAnimationFrame(()=>{
-      const el=document.getElementById("qa-search");
-      if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}
-    });
+    S.quick_add_search=e.target.value;
+    // Re-render just the quick-add sheet content without full render to preserve cursor
+    const sheet = document.getElementById("quick-add-overlay");
+    if(sheet){
+      // Store focus state
+      const cursorPos = e.target.selectionStart;
+      // Full re-render needed for filtered list but restore focus after
+      render();
+      requestAnimationFrame(()=>{
+        const el=document.getElementById("qa-search");
+        if(el){el.focus();el.setSelectionRange(cursorPos,cursorPos);}
+      });
+    }
   });
 
   // Pick an existing activity
