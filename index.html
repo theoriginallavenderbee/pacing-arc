@@ -165,6 +165,11 @@ textarea{resize:none}textarea::placeholder,input::placeholder{color:var(--muted)
 .unscheduled-block { display:flex; align-items:stretch; border-radius:8px; overflow:hidden; margin-bottom:5px; cursor:pointer; transition:opacity .15s; }
 .unscheduled-block.done { opacity:.45; }
 .unscheduled-block:hover { filter:brightness(1.05); }
+/* v11 drag */
+.time-block.dragging { opacity:.4; z-index:1; }
+.drag-ghost { position:fixed; z-index:200; pointer-events:none; opacity:.85; border-radius:8px; box-shadow:var(--shadow-md); }
+.drop-indicator { position:absolute; left:52px; right:4px; height:3px; background:var(--accent); border-radius:2px; z-index:10; pointer-events:none; transition:top .08s ease; }
+.time-grid-lane.drop-target { background:rgba(196,80,58,0.06); }
 
 </style>
 </head>
@@ -3921,29 +3926,29 @@ function renderCanvasDayView(dateStr, today, viewToggle){
         <div style="font-size:.82rem;font-weight:500;color:var(--red);margin-bottom:3px">Today's necessities fill your budget</div>
         <div style="font-size:.75rem;color:var(--muted);line-height:1.6">This is a rest-only day. No discretionary EU remains.</div>
       </div>`
-    : `<div class="card in" style="margin-bottom:12px;padding:12px 14px">
+    : `<div class="card in" id="eu-banner" style="margin-bottom:12px;padding:12px 14px">
         <div style="display:flex;gap:0;text-align:center">
           <div style="flex:1;padding:0 4px">
             <div style="font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Total</div>
-            <div style="font-size:1.2rem;font-weight:600;color:var(--subtle)">${total}</div>
+            <div id="eu-total" style="font-size:1.2rem;font-weight:600;color:var(--subtle)">${total}</div>
             <div style="font-size:.62rem;color:var(--muted)">EU today</div>
           </div>
           <div style="width:1px;background:var(--border);margin:4px 0"></div>
           <div style="flex:1;padding:0 4px">
             <div style="font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Committed</div>
-            <div style="font-size:1.2rem;font-weight:600;color:var(--orange)">${committed}</div>
+            <div id="eu-committed" style="font-size:1.2rem;font-weight:600;color:var(--orange)">${committed}</div>
             <div style="font-size:.62rem;color:var(--muted)">non-negotiable</div>
           </div>
           <div style="width:1px;background:var(--border);margin:4px 0"></div>
           <div style="flex:1;padding:0 4px">
             <div style="font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Discretionary</div>
-            <div style="font-size:1.2rem;font-weight:600;color:${discretionary>=4?"var(--green)":discretionary>=2?"var(--yellow)":"var(--red)"}">${discretionary}</div>
+            <div id="eu-discretionary" style="font-size:1.2rem;font-weight:600;color:${discretionary>=4?"var(--green)":discretionary>=2?"var(--yellow)":"var(--red)"}">${discretionary}</div>
             <div style="font-size:.62rem;color:var(--muted)">yours to use</div>
           </div>
         </div>
         <div style="margin-top:8px;height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;display:flex;gap:1px">
-          <div style="height:100%;width:${total>0?Math.min(100,Math.round(committed/total*100)):0}%;background:var(--orange);border-radius:2px 0 0 2px"></div>
-          <div style="height:100%;width:${total>0?Math.min(100,Math.round(discretionary/total*100)):0}%;background:var(--green);opacity:.6;border-radius:0 2px 2px 0"></div>
+          <div id="eu-bar-committed" style="height:100%;width:${total>0?Math.min(100,Math.round(committed/total*100)):0}%;background:var(--orange);border-radius:2px 0 0 2px"></div>
+          <div id="eu-bar-disc" style="height:100%;width:${total>0?Math.min(100,Math.round(discretionary/total*100)):0}%;background:var(--green);opacity:.6;border-radius:0 2px 2px 0"></div>
         </div>
         ${garminNote ? `<div style="margin-top:8px;font-size:.68rem;color:var(--muted);border-top:1px solid var(--border);padding-top:7px">📡 ${garminNote}</div>` : ""}
       </div>`;
@@ -6661,6 +6666,263 @@ function bindMain(){
       S.block_edit={...block};S.show_block_edit=true;render();
     });
   });
+
+  // ═══════════════════════════════════════════════════
+  // v11: iOS TOUCH DRAG — time blocks + unscheduled blocks
+  // ═══════════════════════════════════════════════════
+  (function initTouchDrag(){
+    const grid = document.querySelector(".time-grid");
+    if(!grid) return;
+
+    const HOUR_H = 60;
+    const START_HOUR = 6;
+    const SNAP_MINS = 15; // snap to 15-min increments
+    const LONG_PRESS_MS = 300;
+
+    let _dragState = null; // {blockId, ghost, origTop, startY, scrollStart, block, isUnscheduled}
+    let _longPressTimer = null;
+    let _dropIndicator = null;
+
+    // Helper: y position in grid → time string
+    function yToTime(y){
+      const totalMins = Math.max(0, (y / HOUR_H) * 60 + START_HOUR * 60);
+      const snapped = Math.round(totalMins / SNAP_MINS) * SNAP_MINS;
+      const h = Math.floor(snapped / 60);
+      const m = snapped % 60;
+      return String(Math.min(23,Math.max(0,h))).padStart(2,"0")+":"+String(m).padStart(2,"0");
+    }
+
+    // Helper: update EU banner live
+    function updateEuLive(){
+      const dateStr = S.canvas_date || todayStr();
+      const {total, committed, discretionary} = calcCanvasEu(dateStr, S.canvas_blocks||[]);
+      const elT = document.getElementById("eu-total");
+      const elC = document.getElementById("eu-committed");
+      const elD = document.getElementById("eu-discretionary");
+      const barC = document.getElementById("eu-bar-committed");
+      const barD = document.getElementById("eu-bar-disc");
+      if(elT) elT.textContent = total;
+      if(elC) elC.textContent = committed;
+      if(elD){
+        elD.textContent = discretionary;
+        elD.style.color = discretionary>=4?"var(--green)":discretionary>=2?"var(--yellow)":"var(--red)";
+      }
+      if(barC && total>0) barC.style.width = Math.min(100,Math.round(committed/total*100))+"%";
+      if(barD && total>0) barD.style.width = Math.min(100,Math.round(discretionary/total*100))+"%";
+    }
+
+    // Create or move the drop indicator line
+    function showDropIndicator(y){
+      if(!_dropIndicator){
+        _dropIndicator = document.createElement("div");
+        _dropIndicator.className = "drop-indicator";
+        grid.appendChild(_dropIndicator);
+      }
+      _dropIndicator.style.top = y + "px";
+      _dropIndicator.style.display = "block";
+    }
+    function hideDropIndicator(){
+      if(_dropIndicator) _dropIndicator.style.display = "none";
+    }
+
+    // Create ghost element
+    function createGhost(el){
+      const ghost = el.cloneNode(true);
+      ghost.className = "drag-ghost";
+      ghost.style.width = el.offsetWidth + "px";
+      ghost.style.height = Math.min(el.offsetHeight, 80) + "px";
+      ghost.style.overflow = "hidden";
+      document.body.appendChild(ghost);
+      return ghost;
+    }
+
+    function startDrag(blockId, touchY, el, isUnscheduled){
+      const block = (S.canvas_blocks||[]).find(b=>b.id===blockId);
+      if(!block) return;
+
+      const ghost = createGhost(el);
+      ghost.style.left = el.getBoundingClientRect().left + "px";
+      ghost.style.top = (touchY - 20) + "px";
+
+      el.classList.add("dragging");
+
+      _dragState = {
+        blockId, ghost, el,
+        startY: touchY,
+        block: {...block},
+        isUnscheduled,
+        gridRect: grid.getBoundingClientRect(),
+      };
+    }
+
+    function moveDrag(touchY){
+      if(!_dragState) return;
+      const {ghost, gridRect} = _dragState;
+
+      // Move ghost
+      ghost.style.top = (touchY - 20) + "px";
+
+      // Calculate grid-relative Y
+      const gridY = touchY - gridRect.top + grid.closest(".section")?.scrollTop || 0;
+      const newTime = yToTime(gridY);
+
+      // Show drop indicator
+      const snappedY = ((parseFloat(newTime.split(":")[0]) + parseFloat(newTime.split(":")[1])/60) - START_HOUR) * HOUR_H;
+      showDropIndicator(snappedY);
+
+      // Preview: update block time and EU live
+      const durMins = _dragState.block.duration_mins || 30;
+      const newStartH = parseInt(newTime.split(":")[0]);
+      const newStartM = parseInt(newTime.split(":")[1]);
+      const endTotalM = newStartH * 60 + newStartM + durMins;
+      const endH = Math.floor(endTotalM/60);
+      const endM = endTotalM % 60;
+      const newEnd = String(Math.min(23,endH)).padStart(2,"0")+":"+String(endM).padStart(2,"0");
+
+      S.canvas_blocks = (S.canvas_blocks||[]).map(b=>{
+        if(b.id !== _dragState.blockId) return b;
+        return {...b, start_time: newTime, end_time: newEnd};
+      });
+
+      updateEuLive();
+    }
+
+    function endDrag(touchY){
+      if(!_dragState) return;
+      const {ghost, el, blockId, gridRect, isUnscheduled} = _dragState;
+
+      // Remove ghost and indicator
+      ghost.remove();
+      hideDropIndicator();
+      el.classList.remove("dragging");
+
+      // Calculate final time
+      const section = grid.closest(".section");
+      const gridY = touchY - gridRect.top + (section ? section.scrollTop : 0);
+      const newTime = yToTime(gridY);
+      const durMins = _dragState.block.duration_mins || 30;
+      const newStartH = parseInt(newTime.split(":")[0]);
+      const newStartM = parseInt(newTime.split(":")[1]);
+      const endTotalM = newStartH * 60 + newStartM + durMins;
+      const endH = Math.floor(endTotalM/60);
+      const endM = endTotalM % 60;
+      const newEnd = String(Math.min(23,endH)).padStart(2,"0")+":"+String(endM).padStart(2,"0");
+
+      // Apply final position
+      S.canvas_blocks = (S.canvas_blocks||[]).map(b=>{
+        if(b.id !== blockId) return b;
+        return {...b, start_time: newTime, end_time: newEnd};
+      });
+
+      // If it was an event, update the event too
+      const block = (S.canvas_blocks||[]).find(b=>b.id===blockId);
+      if(block && block.event_id){
+        const evId = block.event_id;
+        EVENTS = EVENTS.map(ev=>{
+          if(String(ev.id)!==String(evId)) return ev;
+          return {...ev, start_time: newTime, end_time: newEnd};
+        });
+        // Save to Supabase
+        sbUpdate("pacing_arc_events", evId, {start_time: newTime, end_time: newEnd}).catch(()=>{});
+      }
+
+      _dragState = null;
+      saveCanvasBlocks();
+      render();
+      showToast("Moved to " + newTime, "green");
+    }
+
+    function cancelDrag(){
+      if(!_dragState) return;
+      const {ghost, el, block} = _dragState;
+      ghost.remove();
+      hideDropIndicator();
+      el.classList.remove("dragging");
+      // Restore original position
+      S.canvas_blocks = (S.canvas_blocks||[]).map(b=>{
+        if(b.id !== _dragState.blockId) return b;
+        return {...b, start_time: block.start_time, end_time: block.end_time};
+      });
+      _dragState = null;
+      updateEuLive();
+    }
+
+    // Attach to time blocks (scheduled)
+    document.querySelectorAll(".time-block[data-block-id]").forEach(el=>{
+      let _pressX=0, _pressY=0;
+      el.addEventListener("touchstart",e=>{
+        if(e.target.closest("button")) return;
+        _pressX = e.touches[0].clientX;
+        _pressY = e.touches[0].clientY;
+        const blockId = el.dataset.blockId;
+        _longPressTimer = setTimeout(()=>{
+          startDrag(blockId, _pressY, el, false);
+        }, LONG_PRESS_MS);
+      },{passive:true});
+
+      el.addEventListener("touchmove",e=>{
+        const dx = Math.abs(e.touches[0].clientX - _pressX);
+        const dy = Math.abs(e.touches[0].clientY - _pressY);
+        if(!_dragState && (dx>8||dy>8)){
+          clearTimeout(_longPressTimer);
+        }
+        if(_dragState){
+          e.preventDefault();
+          moveDrag(e.touches[0].clientY);
+        }
+      },{passive:false});
+
+      el.addEventListener("touchend",e=>{
+        clearTimeout(_longPressTimer);
+        if(_dragState){
+          endDrag(e.changedTouches[0].clientY);
+        }
+      });
+
+      el.addEventListener("touchcancel",()=>{
+        clearTimeout(_longPressTimer);
+        cancelDrag();
+      });
+    });
+
+    // Attach to unscheduled blocks (drag onto grid gives them a time)
+    document.querySelectorAll(".unscheduled-block[data-block-id]").forEach(el=>{
+      let _pressX=0, _pressY=0;
+      el.addEventListener("touchstart",e=>{
+        if(e.target.closest("button")) return;
+        _pressX = e.touches[0].clientX;
+        _pressY = e.touches[0].clientY;
+        const blockId = el.dataset.blockId;
+        _longPressTimer = setTimeout(()=>{
+          startDrag(blockId, _pressY, el, true);
+        }, LONG_PRESS_MS);
+      },{passive:true});
+
+      el.addEventListener("touchmove",e=>{
+        const dx = Math.abs(e.touches[0].clientX - _pressX);
+        const dy = Math.abs(e.touches[0].clientY - _pressY);
+        if(!_dragState && (dx>8||dy>8)){
+          clearTimeout(_longPressTimer);
+        }
+        if(_dragState){
+          e.preventDefault();
+          moveDrag(e.touches[0].clientY);
+        }
+      },{passive:false});
+
+      el.addEventListener("touchend",e=>{
+        clearTimeout(_longPressTimer);
+        if(_dragState){
+          endDrag(e.changedTouches[0].clientY);
+        }
+      });
+
+      el.addEventListener("touchcancel",()=>{
+        clearTimeout(_longPressTimer);
+        cancelDrag();
+      });
+    });
+  })();
 
   // Colour setup — save
   document.getElementById("btn-canvas-colours-save")?.addEventListener("click",()=>{
