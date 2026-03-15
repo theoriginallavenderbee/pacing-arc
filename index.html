@@ -6605,7 +6605,12 @@ function bindMain(){
   });
 
   // v11: Tap time-block → open event edit sheet (dedicated handler for positioned blocks)
-  document.querySelectorAll(".time-block[data-block-id]").forEach(el=>{
+  const _timeBlocks = document.querySelectorAll(".time-block[data-block-id]");
+  if(_timeBlocks.length===0 && document.querySelector(".time-grid")){
+    // Debug: blocks not found but grid exists — check DOM
+    console.log("v11 debug: time-grid exists but no .time-block[data-block-id] found. timedBlocks in S.canvas_blocks:", (S.canvas_blocks||[]).filter(b=>b.start_time).length);
+  }
+  _timeBlocks.forEach(el=>{
     let _tx=0,_ty=0,_tmoved=false;
     el.addEventListener("touchstart",e=>{_tx=e.touches[0].clientX;_ty=e.touches[0].clientY;_tmoved=false;},{passive:true});
     el.addEventListener("touchmove",e=>{if(Math.abs(e.touches[0].clientX-_tx)>8||Math.abs(e.touches[0].clientY-_ty)>8)_tmoved=true;},{passive:true});
@@ -6615,10 +6620,11 @@ function bindMain(){
       e.preventDefault(); e.stopPropagation();
       const id=el.dataset.blockId;
       const block=(S.canvas_blocks||[]).find(b=>b.id===id);
-      if(!block)return;
+      if(!block){showToast("debug: block not found for id "+id,"red");return;}
       if(block.event_id){
         const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
         if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+        showToast("debug: event not found for event_id "+block.event_id,"red");return;
       }
       S.block_edit={...block};S.show_block_edit=true;render();
     });
@@ -6626,10 +6632,11 @@ function bindMain(){
       if(e.target.closest("button"))return;
       const id=el.dataset.blockId;
       const block=(S.canvas_blocks||[]).find(b=>b.id===id);
-      if(!block)return;
+      if(!block){showToast("debug: block not found for id "+id,"red");return;}
       if(block.event_id){
         const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
         if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+        showToast("debug: event not found for event_id "+block.event_id,"red");return;
       }
       S.block_edit={...block};S.show_block_edit=true;render();
     });
