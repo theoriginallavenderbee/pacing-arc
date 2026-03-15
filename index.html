@@ -1216,23 +1216,9 @@ async function init(){
 }
 
 async function saveCanvasBlocks(){
-  // Save canvas blocks to Supabase so they sync across phone/laptop
-  try{
-    await sbSaveToday({
-      gate:S.gate, eu_budget:S.eu_budget, eu_used:S.eu_used,
-      plan:S.plan||null, checkin:S.ci||null,
-      midday_done:S.midday_done, in_crash:S.in_crash, evening_done:S.evening_done,
-      canvas_blocks:(S.canvas_blocks&&S.canvas_blocks.length?S.canvas_blocks:null)||null,
-      canvas_date:S.canvas_date||null,
-    });
-    SYNC_STATUS="ok";
-  }catch(e){
-    SYNC_STATUS="off";
-    // Fallback: persist to localStorage so not lost on page reload
-    try{localStorage.setItem("pac_canvas_"+todayStr(),JSON.stringify({blocks:S.canvas_blocks,date:S.canvas_date}));}catch(_){}
-    console.warn("[PacingArc] saveCanvasBlocks failed:",e.message);
-  }
-  updateSyncDot();
+  // v11: use queuedSyncToday (merge-based) instead of direct overwrite
+  try{localStorage.setItem("pac_canvas_"+todayStr(),JSON.stringify({blocks:S.canvas_blocks,date:S.canvas_date}));}catch(_){}
+  queuedSyncToday();
 }
 
 async function syncToday(){
@@ -1329,13 +1315,18 @@ function mergeCheckin(local,remote){
   if(!local&&!remote)return null;
   if(!local)return remote;
   if(!remote)return local;
-  const merged={...remote,...local};
-  Object.keys(merged).forEach(k=>{
-    if((local[k]==null||local[k]===undefined)&&remote[k]!=null)merged[k]=remote[k];
+  // Count non-null fields in each — prefer the richer check-in as the base
+  const countFields=obj=>Object.values(obj).filter(v=>v!=null&&v!==undefined&&v!=="").length;
+  const localCount=countFields(local);
+  const remoteCount=countFields(remote);
+  // Use the richer side as base, then fill gaps from the other side
+  const [base,other]=localCount>=remoteCount?[local,remote]:[remote,local];
+  const merged={...base};
+  Object.keys(other).forEach(k=>{
+    if(merged[k]==null||merged[k]===undefined)merged[k]=other[k];
   });
   return merged;
 }
-
 function mergeCanvasBlocks(local,remote){
   if(!local||!local.length)return remote||[];
   if(!remote||!remote.length)return local||[];
