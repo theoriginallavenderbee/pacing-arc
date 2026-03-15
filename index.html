@@ -6606,10 +6606,6 @@ function bindMain(){
 
   // v11: Tap time-block → open event edit sheet (dedicated handler for positioned blocks)
   const _timeBlocks = document.querySelectorAll(".time-block[data-block-id]");
-  if(_timeBlocks.length===0 && document.querySelector(".time-grid")){
-    // Debug: blocks not found but grid exists — check DOM
-    console.log("v11 debug: time-grid exists but no .time-block[data-block-id] found. timedBlocks in S.canvas_blocks:", (S.canvas_blocks||[]).filter(b=>b.start_time).length);
-  }
   _timeBlocks.forEach(el=>{
     let _tx=0,_ty=0,_tmoved=false;
     el.addEventListener("touchstart",e=>{_tx=e.touches[0].clientX;_ty=e.touches[0].clientY;_tmoved=false;},{passive:true});
@@ -6619,24 +6615,48 @@ function bindMain(){
       if(_tmoved)return;
       e.preventDefault(); e.stopPropagation();
       const id=el.dataset.blockId;
-      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
-      if(!block){showToast("debug: block not found for id "+id,"red");return;}
+      // Try S.canvas_blocks first (today), then rebuild for the viewed date
+      let block=(S.canvas_blocks||[]).find(b=>b.id===id);
+      if(!block){
+        const viewDate=S.canvas_date||todayStr();
+        const dateBlocks=buildCanvasBlocksForDate(viewDate);
+        block=dateBlocks.find(b=>b.id===id);
+      }
+      if(!block){
+        // Last resort: if id starts with ev_, extract event_id directly
+        if(id.startsWith("ev_")){
+          const evId=id.replace(/^ev_/,"");
+          const ev=EVENTS.find(ev=>String(ev.id)===evId);
+          if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+        }
+        return;
+      }
       if(block.event_id){
         const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
         if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
-        showToast("debug: event not found for event_id "+block.event_id,"red");return;
       }
       S.block_edit={...block};S.show_block_edit=true;render();
     });
     el.addEventListener("click",e=>{
       if(e.target.closest("button"))return;
       const id=el.dataset.blockId;
-      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
-      if(!block){showToast("debug: block not found for id "+id,"red");return;}
+      let block=(S.canvas_blocks||[]).find(b=>b.id===id);
+      if(!block){
+        const viewDate=S.canvas_date||todayStr();
+        const dateBlocks=buildCanvasBlocksForDate(viewDate);
+        block=dateBlocks.find(b=>b.id===id);
+      }
+      if(!block){
+        if(id.startsWith("ev_")){
+          const evId=id.replace(/^ev_/,"");
+          const ev=EVENTS.find(ev=>String(ev.id)===evId);
+          if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
+        }
+        return;
+      }
       if(block.event_id){
         const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
         if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
-        showToast("debug: event not found for event_id "+block.event_id,"red");return;
       }
       S.block_edit={...block};S.show_block_edit=true;render();
     });
@@ -6808,38 +6828,48 @@ function bindMain(){
   // Feature 3 (v10.2): tap event chip in week view → open event edit sheet
   // Uses click + small drag threshold to distinguish tap from drag
   // Fix 2 (v10.4): tap canvas block in day view → edit sheet
+  // v11: also handles non-today dates by rebuilding blocks or extracting event_id
+  function _findBlockOrEvent(id){
+    let block=(S.canvas_blocks||[]).find(b=>b.id===id);
+    if(!block){
+      const viewDate=S.canvas_date||todayStr();
+      block=buildCanvasBlocksForDate(viewDate).find(b=>b.id===id);
+    }
+    if(block && block.event_id){
+      const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
+      if(ev) return {type:"event",ev,block};
+    }
+    if(!block && id.startsWith("ev_")){
+      const evId=id.replace(/^ev_/,"");
+      const ev=EVENTS.find(ev=>String(ev.id)===evId);
+      if(ev) return {type:"event",ev,block:null};
+    }
+    if(block) return {type:"block",ev:null,block};
+    return null;
+  }
   document.querySelectorAll(".canvas-block[data-block-id]").forEach(el=>{
+    // Skip .time-block elements — they have their own dedicated handler
+    if(el.classList.contains("time-block")) return;
     let _tapX=0,_tapY=0,_tapMoved=false;
     el.addEventListener("mousedown",e=>{_tapX=e.clientX;_tapY=e.clientY;_tapMoved=false;});
     el.addEventListener("mousemove",e=>{if(Math.abs(e.clientX-_tapX)>5||Math.abs(e.clientY-_tapY)>5)_tapMoved=true;});
     el.addEventListener("click",e=>{
-      // Don't trigger on button clicks inside the block
       if(e.target.closest("button"))return;
       if(_tapMoved)return;
-      const id=el.dataset.blockId;
-      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
-      if(!block)return;
-      // Rock block with event_id → open event edit sheet
-      if(block.layer==="rock" && block.event_id){
-        const ev=EVENTS.find(e=>String(e.id)===String(block.event_id));
-        if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
-      }
-      // All other blocks → inline block edit sheet
-      S.block_edit={...block};S.show_block_edit=true;render();
+      const found=_findBlockOrEvent(el.dataset.blockId);
+      if(!found)return;
+      if(found.type==="event"){S.event_edit={...found.ev};S.show_event_sheet=true;render();return;}
+      S.block_edit={...found.block};S.show_block_edit=true;render();
     });
     el.addEventListener("touchstart",e=>{_tapX=e.touches[0].clientX;_tapY=e.touches[0].clientY;_tapMoved=false;},{passive:true});
     el.addEventListener("touchmove",e=>{if(Math.abs(e.touches[0].clientX-_tapX)>8||Math.abs(e.touches[0].clientY-_tapY)>8)_tapMoved=true;},{passive:true});
     el.addEventListener("touchend",e=>{
       if(e.target.closest("button"))return;
       if(_tapMoved)return;
-      const id=el.dataset.blockId;
-      const block=(S.canvas_blocks||[]).find(b=>b.id===id);
-      if(!block)return;
-      if(block.layer==="rock"&&block.event_id){
-        const ev=EVENTS.find(ev=>String(ev.id)===String(block.event_id));
-        if(ev){S.event_edit={...ev};S.show_event_sheet=true;render();return;}
-      }
-      S.block_edit={...block};S.show_block_edit=true;render();
+      const found=_findBlockOrEvent(el.dataset.blockId);
+      if(!found)return;
+      if(found.type==="event"){S.event_edit={...found.ev};S.show_event_sheet=true;render();return;}
+      S.block_edit={...found.block};S.show_block_edit=true;render();
     });
   });
 
